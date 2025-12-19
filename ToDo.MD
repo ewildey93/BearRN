@@ -1,0 +1,5 @@
+- incorporate corn
+- evi as spline not quadratic
+- run without scales and choose individual scale, go off strength of effects
+- spatial random effect
+- 

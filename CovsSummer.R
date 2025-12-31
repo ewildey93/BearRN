@@ -24,7 +24,8 @@ BEARCPUE2 <- BEARCPUE%>%group_by(cam_site_id, year)%>%add_tally(name = "n.occ")%
   group_by(cam_site_id)%>%add_tally(name="n.occ.total")
 BEARCPUE3 <- BEARCPUE2%>%filter(n.occ > 5)%>%select(1:8,13:16,20,21)#1:3,5,8,14,15,16,17,18
 camsites <- BEARCPUE3%>%distinct(cam_site_id, geometry)%>%st_transform(., 3071)
-camsiteyears <- BEARCPUE3%>%group_by(year)%>%summarise(n=n_distinct(cam_site_id))
+BEARCPUE3%>%group_by(year)%>%summarise(n=n_distinct(cam_site_id))
+camsiteyears <- BEARCPUE3%>%ungroup()%>%distinct(cam_site_id, year, geometry)%>%group_split(year)%>%setNames(2019:2024)
 
 
 # camsite_buffers <- st_buffer(camsites, dist = 500,endCapStyle = "SQUARE")
@@ -429,6 +430,7 @@ for(i in 1:length(unique(EVI_MODIS_16DAY$camsiteyear))){
 table(is.na(EVIModissiteyearocc$meanEVI))
 what <- EVIModissiteyearocc[is.na(EVIModissiteyearocc$meanEVI),]
 saveRDS(EVIModissiteyearocc, "./EVIsiteyearoccSummer2019-2024.rds")
+EVIModissiteyearocc <- readRDS("./EVIsiteyearoccSummer2019-2024.rds")
 EVIModisBearCPUE <- left_join(BEARCPUE3, EVIModissiteyearocc, by=c("cam_site_id", "year", "occ"))
 table(is.na(EVIModisBearCPUE$meanEVI)) #2250 false
 BEARCPUE4 <- left_join(BEARCPUE3, EVIModissiteyearocc, by=c("cam_site_id", "year", "occ"))
@@ -509,8 +511,8 @@ dbf <- list.files(lf_dir, pattern = ".dbf$",
 dbf_tbl  <- foreign::read.dbf(dbf)
 HDistLU <- read.csv("C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/LF2024_HDist24.csv")
 dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
-levels(hdist) <- dbf2[,c(1,22)]
-hdist <- addCats(hdist, value=dbf2[,c(7,9:12)])
+levels(hdist) <- dbf_tbl[,c(1,10)]
+hdist <- addCats(hdist, value=dbf_tbl[,c(4:9)])
 cats(hdist)
 activeCat(hdist)
 levels(hdist)
@@ -574,16 +576,80 @@ lm_output <-
 
 lm_output <- lm_output%>%select(-matches("\\+"))
 colnames(lm_output)[2:6] <- gsub(x = colnames(lm_output)[2:6], pattern = "0-10", "Dist")
-
+camsites <- left_join(camsites, lm_output)
 
 #########################################################################################
 ####                             CropScape                                          #####
 #########################################################################################
 lapply(unique(BEARCPUE$year), function (x) GetCDLData(aoi = 55, year = x, type = 'f', format = 'raster', crs = '+init=epsg:4326',
       save_path=paste0("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/Crops", x, ".tif")))#aoi=FIPS code for WI
+GetCDLData(aoi = 55, year = 2019, type = 'f', format = 'raster', crs = '+init=epsg:4326',
+           save_path=paste0("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/Crops", "2019", ".tif"))
+
+CropRasts <- list.files("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/", full.names = TRUE)
+CropRasts2 <- lapply(CropRasts, function (x) rast(x))
+data("linkdata")
+camsiteyearsCDL <- lapply(camsiteyears, function (x) st_transform(x, crs(CropRasts2[[1]])))
+
+# Wiscland 3 prop land cover
+buffers2=buffers %>% 
+  set_names()
+lm_output <- 
+  mapply(x= CropRasts2, y=camsiteyearsCDL,
+  # produce a dataframe after this is all done
+  \(x,y) lapply(buffers2, 
+     \(z) sample_lsm(
+      # raster layer
+      landscape = x,
+      # camera locations
+      y = y,
+      # get landcover class level metrics
+      level = "class",
+      # return NA values for classes not in buffer
+      # all_classes = TRUE, 
+      # camera site IDs here
+      plot_id = y$cam_site_id,
+      # can do multiple metrics at once
+      what = 'lsm_c_pland',
+      # buffer sizes to use
+      size = z, 
+      # default is square buffer
+      shape = "circle", 
+      # turn warnings on or off
+      verbose = FALSE 
+    )
+  ), SIMPLIFY=FALSE
+)
+names(lm_output) <- 2019:2024
+
+lm_output2 <- rbindlist(lapply(lm_output, function(x) rbindlist(x, idcol = "buffer_size")), idcol="year")
+lm_output2 <- left_join(lm_output2, linkdata, by=join_by(class==MasterCat))
+Corn <- lm_output2[grep(pattern = "Corn", x = lm_output2$Crop, ignore.case = TRUE),]
+Corn2 <- Corn%>%group_by(year, buffer_size, plot_id)%>%summarise(CornProp=sum(value))
+Corn2$buffer_size <- as.numeric(Corn2$buffer_size)
+# in this data frame plot_id = camera ID
+# class = landcover type
+# value = % of that landcover type in the buffer
+# make each landcover type x buffer into a column
+Corn3 <- 
+  Corn2 %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    names_from = buffer_size,
+    names_prefix="Corn",
+    values_from = CornProp,
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  ) %>%
+  # clean up names
+  rename(cam_site_id = plot_id)
+Corn3$season <- as.numeric(Corn3$year)-2018
+Corn3$year <- as.numeric(Corn3$year)
 
 
-
+BEARCPUE5 <- left_join(BEARCPUE4, Corn3)
+BEARCPUE5 <- BEARCPUE5%>%mutate(across(matches("Corn"), ~replace_na(.x, 0)))
 
 ##########################################################################################
 ####                   save sitecovs and detcovs  for use in modeling                #####
@@ -591,8 +657,9 @@ lapply(unique(BEARCPUE$year), function (x) GetCDLData(aoi = 55, year = x, type =
 camsites <- left_join(camsites[,1:2], lm_output, by="cam_site_id")
 camsites <- camsites[,-8]
 saveRDS(camsites, "./sitevariablesSummer.rds")
-BEARCPUE5 <- left_join(BEARCPUE4,  st_drop_geometry(camsites) ,by="cam_site_id")
-saveRDS(BEARCPUE5, "./ModelingDFSummer.rds")
+BEARCPUE6 <- left_join(BEARCPUE5,  st_drop_geometry(camsites) ,by="cam_site_id")%>%ungroup()
+colSums(is.na(BEARCPUE6))
+saveRDS(BEARCPUE6, "./ModelingDFSummer.rds")
 ############################################################################################
 #####                             scrap                                                 ####
 ############################################################################################
@@ -764,7 +831,7 @@ NAEVI%>%group_by(camsiteyear)
 
 leaflet() %>% 
   addProviderTiles('Esri.WorldImagery') %>%
-  addCircleMarkers(data=NAEVI16DaybyCamBig, fillColor = "white", fillOpacity = 1, stroke=F, radius=3, label=NAEVI16DaybyCamBig$Freq)
+  addCircleMarkers(data=st_transform(NADF, 4326), fillColor = "white", fillOpacity = 1, stroke=F, radius=3, label=NADF$cam_site_id)
 
 EVIModisBearCPUE%>%group_by(cam_site_id, year)%>%summarise()
 

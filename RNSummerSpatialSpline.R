@@ -13,12 +13,15 @@ Zones <- readRDS("./ModelingDFSummer.rds")%>%ungroup()%>%select(cam_site_id, sea
   select(cam_site_id, yearID=season, siteID, bear_mgmt_zone_id)%>%mutate(cam_site_id_num = as.numeric(as.factor(cam_site_id)))%>%
   st_drop_geometry()
 
-
-ModelingDF <- readRDS("./ModelingDFSummer.rds")%>%st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18) #5/21-8/26 this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
-ModelingDF <- ModelingDF[-which(ModelingDF$camera_version %in% c("V2,V4","V2,V3")),] #remove occasions which have multiple camera versions
+#5/21-8/26 this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
+#results in n.occs column being wrong but don't think that matters
+ModelingDF <- readRDS("./ModelingDFSummer.rds")%>%st_transform(., 3071)%>%cbind(., st_coordinates(.))%>%
+  st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18)%>%filter(BEAR_ADULT_AMT < 200) 
+#remove occasions which have multiple camera versions
+ModelingDF <- ModelingDF[-which(ModelingDF$camera_version %in% c("V2,V4","V2,V3")),] 
 only1occ <- ModelingDF%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
 ModelingDF <- ModelingDF%>%filter(
-  !(paste0(cam_site_id, year) %in% paste0(only1occ$cam_site_id,only1occ$year)))
+  !(paste0(cam_site_id, year) %in% paste0(only1occ$cam_site_id,only1occ$year)))%>%relocate(Corn500, .before=Corn1000)
 #split up data frame by year and reshape to wide format for detections histories for each year
 dethist <- split(ModelingDF, ModelingDF$year)
 dethist <- lapply(dethist, function (x) tidyr::pivot_wider(x, id_cols = c(cam_site_id, year), names_from = occ, values_from = BEAR_ADULT_AMT, names_sort = TRUE)%>%ungroup())
@@ -52,17 +55,17 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF%>%mutate(across(c(10, 12, 14:35), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF%>%mutate(across(c(10, 12, 14:37), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
-scalevars <- grep(x = colnames(ModelingDF2), pattern = "_\\d+$", value = TRUE)
+scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
-sitecovcols <- c("cam_site_id", "yearID", "year", "Lat", scalevars)
+sitecovcols <- c("cam_site_id", "yearID", "year", "X", "Y", scalevars)
 #make dataframe of site covariates and add site ID
 sitecovs <- ModelingDF2%>%select(all_of(sitecovcols))%>%distinct()%>%arrange(year, cam_site_id)%>%
   group_by(year)%>%mutate(siteID = row_number())%>%ungroup()%>%relocate(siteID)
 #make a siteID x year matrix of camera site IDs
-camsites <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id = as.numeric(as.factor(cam_site_id)))%>%
-  pivot_wider(values_from = cam_site_id, names_from = yearID)%>%select(-siteID)%>%as.matrix()
+camsiteskey <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id2 = as.numeric(as.factor(cam_site_id)))
+camsites <- camsiteskey%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
 #make a siteID x year matrix of number of occasions
 nsurveys <- ModelingDF2%>%group_by(year)%>%mutate(siteID=as.numeric(factor(cam_site_id)))%>%
   ungroup()%>%group_by(cam_site_id,siteID,year,yearID)%>%summarise(nsurveys=n())%>%arrange(yearID, siteID)%>%ungroup()
@@ -77,24 +80,29 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
   select(-siteID)%>%
   as.matrix()%>%
   unname()
-# make a siteID x year matrix of scaled Latitude
-Lat <- sitecovs%>%select(year, siteID, Lat)%>%
-  pivot_wider(names_from = year, values_from = Lat)%>%
+# make a siteID x year matrix of scaled X and Y coordinate
+X <- sitecovs%>%select(year, siteID, X)%>%
+  pivot_wider(names_from = year, values_from = X)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+Y <- sitecovs%>%select(year, siteID, Y)%>%
+  pivot_wider(names_from = year, values_from = Y)%>%
   select(-siteID)%>%
   as.matrix()%>%
   unname()
 
 #spatial spline
-coordsdf <- readRDS("./ModelingDF.rds")%>%cbind(., st_coordinates(.))%>%select("cam_site_id", "X", "Y")%>%distinct()
+coordsdf <- ModelingDF%>%select("cam_site_id", "X", "Y")%>%distinct()
 coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
-knots <- read_csv("knots.csv")
+spknots <- read.csv("knots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
 sd_x <- sd(coordsdf$X)
 mean_y <- mean(coordsdf$Y)
 sd_y <- sd(coordsdf$Y)
 
-knots <- knots %>%
+spknots <- spknots %>%
   mutate(X.scale = (X-mean_x)/sd_x,
          Y.scale = (Y-mean_y)/sd_y) %>%
   dplyr::select(X.scale,Y.scale)
@@ -104,18 +112,31 @@ dat <- coordsdf %>%
          Y.scale = (Y-mean_y)/sd_y)
 
 # get matrix ready for spatial smoothing
-knots.dist <- dist(knots,"euclidean",diag=T,upper=T)
-omega_all = knots.dist^2*log(knots.dist) # basis
-svd.omega_all <- svd(omega_all)
-sqrt.omega_all <- t(svd.omega_all$v %*%
-                      (t(svd.omega_all$u)*sqrt(svd.omega_all$d)))
+spknots.dist <- dist(spknots,"euclidean",diag=T,upper=T)
+sp.omega_all = spknots.dist^2*log(spknots.dist) # basis
+sp.svd.omega_all <- svd(sp.omega_all)
+sp.sqrt.omega_all <- t(sp.svd.omega_all$v %*%
+                      (t(sp.svd.omega_all$u)*sqrt(sp.svd.omega_all$d)))
 
 # now for each spline
-cov.dist_all = fields::rdist(x1=cbind(dat$X.scale,dat$Y.scale),x2=knots)
-Z_K = cov.dist_all^2*log(cov.dist_all) # basis
-Z <- t(solve(sqrt.omega_all,t(Z_K)))
-Z <- (Z - meanZ)/sdZ #for prediction?
+sp.cov.dist_all = fields::rdist(x1=cbind(dat$X.scale,dat$Y.scale),x2=spknots)
+sp.Z_K = sp.cov.dist_all^2*log(sp.cov.dist_all) # basis
+sp.Z <- t(solve(sp.sqrt.omega_all,t(sp.Z_K)))
+sp.meanZ <- mean(sp.Z)
+sp.sdZ <- sd(sp.Z)
+sp.Z <- (sp.Z - sp.meanZ)/sp.sdZ #for prediction?
 
+sp.Z2 <- cbind.data.frame(coordsdf$cam_site_id, sp.Z)
+colnames(sp.Z2)[1] <- "cam_site_id"
+sp.Z3 <- left_join(camsiteskey, sp.Z2)
+sp.Zarray <- array(NA, dim=c(maxsites,no.years,nrow(spknots)))
+for( t in 1:no.years ) {
+  for( k in 1:nrow(spknots)) {
+    for( i in 1:nsite[t]){
+      sp.Zarray[ i, t, k] <- as.numeric(sp.Z3[ c( sp.Z3$siteID == i & sp.Z3$yearID == t), 4+k])
+    }
+  }
+}
 
 #multi-scale state covariates
 #Developed
@@ -160,6 +181,19 @@ for( t in 1:no.years ) {
   }
 }
 
+#Corn
+Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
+  pivot_longer(cols = matches("Corn"), names_pattern="(\\d+$)", names_to = "scale")
+
+Corn_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+for( t in 1:no.years ) {
+  for( s in 1:5) {
+    for( i in 1:nsite[t]){
+      Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales[s] & Corn$yearID == t), "value"]$value
+    }
+  }
+}
+
 #detection covariates
 detcovcols <- c("cam_site_id", "yearID", "year", "occ","camera_version", "meanEVI", "days_active")
 detcovs <- ModelingDF2%>%select(all_of(detcovcols))%>%arrange(year, cam_site_id)%>%
@@ -168,15 +202,43 @@ detcovs <- ModelingDF2%>%select(all_of(detcovcols))%>%arrange(year, cam_site_id)
 
 EVI <- readRDS("./EVIsiteyearoccSummer2019-2024.rds")%>%arrange(year, cam_site_id)%>%mutate(meanEVI=scale(meanEVI))
 EVI2 <- left_join(Dethistlong2, EVI)
-bsEVI <- bSpline(EVI$meanEVI)
-inprod(beta[], X[i,])
-
 
 EVI_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
 for( t in 1:no.years ) {
   for( j in 1:no.occs) {
     for( i in 1:nsite[t]){
       EVI_array[ i, j, t] <- EVI2[ c( EVI2$siteID == i & EVI2$occre == j & EVI2$yearID == t), "meanEVI"]$meanEVI
+    }
+  }
+}
+# knots:
+EVI.num.knots = 5
+EVI.knots<-quantile(unique(EVI2$meanEVI),
+                seq(0,1,length=(EVI.num.knots+2))[-c(1,(EVI.num.knots+2))])
+
+# construct design matrix Z:
+EVI.Z_K <- (abs(outer(as.numeric(EVI2$meanEVI),EVI.knots,"-")))^3
+
+EVI.OMEGA_all <- (abs(outer(EVI.knots,EVI.knots,"-")))^3
+
+EVI.svd.OMEGA_all <- svd(EVI.OMEGA_all)
+
+EVI.sqrt.OMEGA_all <- t(EVI.svd.OMEGA_all$v %*%
+                      (t(EVI.svd.OMEGA_all$u)*sqrt(EVI.svd.OMEGA_all$d)))
+
+EVI.Z <- t(solve(EVI.sqrt.OMEGA_all,t(EVI.Z_K)))
+meanZ <- mean(EVI.Z)
+sdZ <- sd(EVI.Z)
+EVI.Z <- (EVI.Z-meanZ)/sdZ
+
+EVI3 <- cbind(EVI2, EVI.Z)
+EVIZ_array <- array(NA, dim=c(maxsites,no.occs,no.years, EVI.num.knots)) #sites, occasions, years
+for( t in 1:no.years ) {
+  for( j in 1:no.occs) {
+    for( i in 1:nsite[t]){
+      for(k in 1:EVI.num.knots){
+        EVIZ_array[ i, j, t, k] <- EVI3[ c( EVI3$siteID == i & EVI3$occre == j & EVI3$yearID == t), 8+k]
+      }
     }
   }
 }
@@ -247,23 +309,26 @@ constants <- list(
   nversions=length(unique(cam_version$cam_versionID2))-1,
   nsurveys=nsurveys2,
   camversion=camversion_array,
-  nknots=50
+  sp.nknots=50,
+  EVI.nknots=5
 )
 
 # Bundle data (counts and covariates).
 data <- list(
   y = Bear_All,
   Year = yr,
-  Latitude=Lat,
-  HFI=HFI_array,
+  X=X,
+  Y=Y,
+  Dev=Developed_array,
   Dist=Dist_array,
   Forest=Forest_array,
+  Corn=Corn_array,
   EVI=EVI_array,
-  EVI2=EVI2_array,
   daysactive=daysactive_array,
   occ=occscale_array,
   catprobs = c(0.2, 0.2, 0.2, 0.2, 0.2),
-  Z=Z
+  sp.Z= sp.Zarray,
+  EVI.Z= EVIZ_array
 )
 
 RNcode <- nimbleCode({
@@ -282,28 +347,37 @@ RNcode <- nimbleCode({
   # regression coefficient for ruffed grouse priority zone
   b_Yr ~ dnorm(0, 2)
   # regression coefficient for Human Footprint Index
-  b_HFI ~ dnorm(0, 2)
-  # regression coefficient for Lat
-  b_Lat ~ dnorm(0, 2)
+  b_Dev ~ dnorm(0, 2)
+  # regression coefficient for X coordinate
+  b_X ~ dnorm(0, 2)
+  # regression coefficient for Y coordinate
+  b_Y ~ dnorm(0, 2)
   # regression coefficient for Dist
   b_Dist ~ dnorm(0, 2)
   # regression coefficient for Forest
   b_Forest ~ dnorm(0, 2)
+  # regression coefficient for Forest
+  b_Corn ~ dnorm(0, 2)
   
  
   
   
-  for (k in 1:nknots) {
-    spat.spline[k] ~ dnorm(0,sigma.spat.spline)
+  for (k in 1:sp.nknots) {
+    spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
+  }
+  for (k in 1:EVI.nknots) {
+    b[k] ~ dnorm(0,sigma.EVI)
   }
   
   # spline random effect priors
-  sigma.spat.spline~dunif(0,100)
+  sigma.spat.spline.b~dunif(0,100)
+  
+  # spline random effect priors
+  sigma.EVI~dunif(0,100)
   
   ## Priors for detection parameters ##
   # coefficient for occasion
   a_EVI ~ dlogis(0, 1)
-  a_EVI2 ~ dlogis(0, 1)
   a_daysactive ~ dlogis(0,1)
   #a_occ ~ dlogis(0,1)
   for(v in 1:nversions){
@@ -316,6 +390,7 @@ RNcode <- nimbleCode({
   abundance_scale[1] ~ dcat(catprobs[1:5])
   abundance_scale[2] ~ dcat(catprobs[1:5])
   abundance_scale[3] ~ dcat(catprobs[1:5])
+  abundance_scale[4] ~ dcat(catprobs[1:5])
   
   
   for( t in 1:nyear ) { #loop over site then year?
@@ -324,19 +399,21 @@ RNcode <- nimbleCode({
     for( i in 1:nsite[t] ){
       N[i, t] ~ dpois( lambda[ i, t ] )
       log(lambda[i, t]) <-  b_Yr*Year[i, t] +#make this a factor? 
-        b_Lat*Latitude[i, t] + 
+        b_X*X[i, t] + b_Y*Y[i, t] +
         #scaled parameters
-        b_HFI*HFI[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + 
+        b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
         #cam_site random effect
-        s[camsites[i,t]] #s[i,t] - spatial random effect
+        s[i,t] #s[i,t] - spatial random effect
       
-      s[camsites[i,t]] <- inprod(spat.spline[1:nknots],Z[camsites[i,t],1:nknots])
+      s[i,t] <- inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
       
       #detection model  
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
-        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI*EVI[i,k,t] + a_EVI2*EVI[i,k,t]*EVI[i,k,t] #EVI and occ probably correlated + a_occ*occ[i,k,t] + eps_p[camsites[i,t]]
+        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #EVI and occ probably correlated + a_occ*occ[i,k,t] + eps_p[camsites[i,t]]
         y[i, k, t] ~ dbern(muy[i, k, t])
+        
+        EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
       }
     }
   }
@@ -355,29 +432,34 @@ inits <- function() {
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
              b_Yr = runif(1, -1, 1),
-             b_Lat = runif(1, -1, 1),
-             b_HFI = runif(1, -1, 1),
+             b_X = runif(1, -1, 1),
+             b_Y = runif(1, -1, 1),
+             b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
+             b_Corn= runif(1, -1, 1),
              a_version = runif(constants$nversions, -1, 1),
              a_daysactive = runif(1, -1, 1),
              a_EVI = runif(1, -1, 1),
-             a_EVI2 = runif(1, -1, 1),
+             spat.spline.b=rep(1,constants$sp.nknots),
+             sigma.spat.spline.b=1,
+             b=rep(1,constants$EVI.nknots),
+             sigma.EVI=1,
              #a_occ = runif(1, -1, 1),
-             eps_N = rnorm(constants$ncams, 0, 2),
+             #eps_N = rnorm(constants$ncams, 0, 2),
              #eps_p = rnorm(constants$ncams, 0, 2),
-             abundance_scale=rcat(3, c(1/3,1/3,1/3)),
+             abundance_scale=rcat(4, c(1/3,1/3,1/3)),
              rho = array(data = runif(length(Bear_All), 0, 1),
-                         dim=c(maxsites,no.occs,no.years)),
-             sd_n = runif(1, 0, 2)
-             #sd_p = runif(1, 0, 2)
+                         dim=c(maxsites,no.occs,no.years))
   )
 }
 
 # parameters to monitor
-keepers <- c("lambda", 'b_HFI', "b_Lat", "b_Yr", "b_Dist", "b_Forest", 
-             "a_version", "a_daysactive", "a_EVI", "a_EVI2",
-             "abundance_scale", "muy") #"a_occ",
+keepers <- c("lambda", 'b_Dev', "b_X","b_Y", "b_Yr", 
+             "b_Dist", "b_Forest", "b_Corn",
+             "spat.spline.b", "b",
+             "a_version", "a_daysactive", "a_EVI", 
+             "abundance_scale", "muy") 
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
 # running with 200 iterations took about 10 minutes on my laptop with 4 cores
@@ -436,28 +518,36 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            thin= 5,
                            inits=inits(),
                            WAIC = TRUE)
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year + Lat + HFIsc + Distsc + Forestsc + 1|camsite
-                                 p <- version + daysactive + EVI + EVI2"))
-saveRDS(samples, "./RNsamples30000Summer.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year + X + Y + Devsc + Distsc + Forestsc + Cornsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline"))
+saveRDS(samples2, "./RNsamplesSummerSpSpline.EVISpline.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
 MCMCsummary(samples,params = "b_Lat", round = 2)
 MCMCsummary(samples,params = "b_HFI", round = 2)
 MCMCsummary(samples,params = "abundance_scale", round = 2)
-MCMCsummary(samples,params = "a_version", round = 2) #detection really low backtransformed to response scale, naive detection 0.07
+MCMCsummary(samples,params = "a_version", round = 2) 
+MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambda[1262, 1]", "lambda[1066, 2]", "lambda[1067, 2]"), round = 2, ISB = FALSE)
 
 
 PR <- rnorm(15000, 0, 2)
-MCMCtrace(samples, 
-          params = c('b_Lat', 'b_HFI', 'b_Forest', "b_Yr", "b_Dist"),
+MCMCtrace(samples[[1]], 
+          params = c('b_X', 'b_Y', 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
           ISB = FALSE,
           exact = TRUE,
           priors = PR,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samples, 
+MCMCtrace(samples[[1]], 
+          params = c('spat.spline.b[1]', 'spat.spline.b[2]', 'spat.spline.b[3]', 'spat.spline.b[4]', 'spat.spline.b[5]'),
+          ISB = FALSE,
+          exact = TRUE,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCtrace(samples[[1]], 
           params = c('abundance_scale'),
           ISB = TRUE,
           exact = TRUE,
@@ -465,20 +555,65 @@ MCMCtrace(samples,
           Rhat = TRUE,
           n.eff = TRUE)
 MCMCtrace(samples[[1]], 
-          params = c("a_version", "a_daysactive", "a_EVI", "a_EVI2"),
+          params = c("a_version", "a_daysactive", "a_EVI"),
           ISB = TRUE,
           exact = TRUE,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samples, 
-          params = c("lambda[991, 1]", "lambda[992, 1]", "lambda[993, 1]", "lambda[994, 1]", "lambda[995, 1]"), #still has nodes for "lambda[1243, 1]" and such
+MCMCtrace(samples[[1]], 
+          params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambda[1262, 1]", "lambda[1066, 2]", "lambda[1067, 2]"), #still has nodes for "lambda[1243, 1]" and such
           ISB = FALSE,
           exact = TRUE,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
+
+#predicting EVI spline
+EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
+pred.data <- expand.grid(camversion=1, daysactive=0.2211643, EVI=EVI.pred)
+# prediction dataset for spatial smoothing
+pred.EVI.Z_K <- (abs(outer(as.numeric(pred.data$EVI),EVI.knots,"-")))^3
+
+pred.EVI.Z <- t(solve(EVI.sqrt.OMEGA_all,t(pred.EVI.Z_K)))
+
+# standardize for better performance
+pred.EVI.Z <- (pred.EVI.Z-meanZ)/sdZ
+pred.data2 <- cbind(pred.data, pred.EVI.Z)
+
+#get mean response of spline
+MCMCsummary(samples[[1]],params = "b", round = 3, ISB = T)
+bmeans <- MCMCsummary(samples[[1]],params = "b", round = 3, ISB = T)
+camversionmeans <- MCMCsummary(samples[[1]],params = "a_version", round = 3, ISB = T)
+daysactivemean <- MCMCsummary(samples[[1]],params = "a_daysactive", round = 3, ISB = T)
+EVImean <- MCMCsummary(samples[[1]],params = "a_EVI", round = 3, ISB = T)
+rho.mean <- plogis(camversionmeans$mean[1] + daysactivemean$mean*0.2211643 + EVImean$mean*pred.data$EVI +bmeans$mean[1]*pred.EVI.Z[,1] + bmeans$mean[2]*pred.EVI.Z[,2] + bmeans$mean[3]*pred.EVI.Z[,3] +
+                     bmeans$mean[4]*pred.EVI.Z[,4] + bmeans$mean[5]*pred.EVI.Z[,5])
+#get CRIs for spline
+#combine MCMC chains into one
+allchains <- MCMCchains(samples[[1]], params =c("a_version", "a_daysactive", "a_EVI", "b"))
+#loop through estimated parameter at each iteration
+rho.preds <- array(dim = c(length(pred.data$EVI), length(allchains[,"a_version[1]"])))
+for(j in 1:length(allchains[,"a_version[1]"])){
+  rho.preds[,j] <- plogis(allchains[,"a_version[1]"][j] + allchains[,"a_daysactive"][j]*0.2211643 + allchains[,"a_EVI"][j]*pred.data$EVI + 
+                            allchains[,"b[1]"][j]*pred.EVI.Z[,1] + allchains[,"b[2]"][j]*pred.EVI.Z[,2] + allchains[,"b[3]"][j]*pred.EVI.Z[,3] +
+                            allchains[,"b[4]"][j]*pred.EVI.Z[,4] + allchains[,"b[5]"][j]*pred.EVI.Z[,5])
+}
+#calculate interval
+CL <- apply(rho.preds, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+rhoplotdf <- cbind(pred.data2, rho.mean, t(CL))
+rhoplotdf$EVI <- rhoplotdf$EVI * attr(EVI2$meanEVI, "scaled:scale") + attr(EVI2$meanEVI, "scaled:center")
+colnames(rhoplotdf)[10:11] <- c("CL2.5", "CL97.5")
+ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="blue") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.3,fill="blue", color="blue")
+
+rhoplotdf <- cbind(pred.data2, rho.mean)
+rhoplotdf$EVI <- rhoplotdf$EVI * attr(EVI2$meanEVI, "scaled:scale") + attr(EVI2$meanEVI, "scaled:center")
+ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_point() #+ geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5))
+
+
 
 runCrossValidate
 ############################################################################################
@@ -584,3 +719,16 @@ ifelse(apply(cam_version[,3:13], 1, unique))
 
 NANZmat <- coordsdf[which(is.na(Z[,1])),]
 compare2knots <- cbind(NANZmat, as.data.frame(knots$design))
+
+
+EVI <- readRDS("./EVIsiteyearoccSummer2019-2024.rds")%>%arrange(year, cam_site_id)%>%mutate(meanEVI=scale(meanEVI))
+EVI2 <- left_join(Dethistlong2, EVI)
+bsEVI <- bSpline(ModelingDF$meanEVI)
+
+summary(fm1 <- mgcv::gam(BEAR_ADULT_AMT ~ s(meanEVI), data = ModelingDF, family = "poisson"))
+## example of safe prediction
+plot(ModelingDF[,c(14,8)], xlab = "meanEVI", ylab = "BEAR_ADULT_AMT")
+EVI <- seq(2000, 8000, length.out = 100)
+lines(EVI, predict(fm1, data.frame(meanEVI = EVI)), col="red")
+
+inprod(beta[], X[i,])

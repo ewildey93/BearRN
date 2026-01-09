@@ -78,20 +78,56 @@ Lat <- sitecovs%>%select(year, siteID, Lat)%>%
   as.matrix()%>%
   unname()
 
+#spatial spline
+coordsdf <- readRDS("./ModelingDF.rds")%>%cbind(., st_coordinates(.))%>%select("cam_site_id", "X", "Y")%>%distinct()
+coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
+spknots <- read_csv("knots.csv")
+# scale coordinates 
+mean_x <- mean(coordsdf$X)
+sd_x <- sd(coordsdf$X)
+mean_y <- mean(coordsdf$Y)
+sd_y <- sd(coordsdf$Y)
+
+spknots <- spknots %>%
+  mutate(X.scale = (X-mean_x)/sd_x,
+         Y.scale = (Y-mean_y)/sd_y) %>%
+  dplyr::select(X.scale,Y.scale)
+
+dat <- coordsdf %>%
+  mutate(X.scale = (X-mean_x)/sd_x,
+         Y.scale = (Y-mean_y)/sd_y)
+
+# get matrix ready for spatial smoothing
+spknots.dist <- dist(spknots,"euclidean",diag=T,upper=T)
+sp.omega_all = spknots.dist^2*log(spknots.dist) # basis
+sp.svd.omega_all <- svd(sp.omega_all)
+sp.sqrt.omega_all <- t(sp.svd.omega_all$v %*%
+                         (t(sp.svd.omega_all$u)*sqrt(sp.svd.omega_all$d)))
+
+# now for each spline
+sp.cov.dist_all = fields::rdist(x1=cbind(dat$X.scale,dat$Y.scale),x2=spknots)
+sp.Z_K = sp.cov.dist_all^2*log(sp.cov.dist_all) # basis
+sp.Z <- t(solve(sp.sqrt.omega_all,t(sp.Z_K)))
+sp.meanZ <- mean(sp.Z)
+sp.sdZ <- sd(sp.Z)
+sp.Z <- (sp.Z - sp.meanZ)/sp.sdZ #for prediction?
+
 #multi-scale state covariates
-#Human Footprint Index
-HFI <- sitecovs%>%select(yearID, siteID, matches("HFI"))%>%
-  pivot_longer(cols = matches("HFI"), names_pattern="(\\d+$)", names_to = "scale")
-  
-  scales <- unique(HFI$scale)
-  HFI_array <- array(NA, dim=c(1243,6,5)) #sites, years, scales
-  for( t in 1:6 ) {
-    for( s in 1:5) {
-      for( i in 1:nsite[t]){
-        HFI_array[ i, t, s] <- HFI[ c( HFI$siteID == i & HFI$scale == scales[s] & HFI$yearID == t), "value"]$value
-      }
+#Developed
+Developed <- sitecovs%>%select(yearID, siteID, matches("Developed"))%>%
+  pivot_longer(cols = matches("Developed"), names_pattern="(\\d+$)", names_to = "scale")
+
+scales <- unique(Developed$scale)
+Developed_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+for( t in 1:no.years ) {
+  for( s in 1:5) {
+    for( i in 1:nsite[t]){
+      Developed_array[ i, t, s] <- Developed[ c( Developed$siteID == i & Developed$scale == scales[s] & Developed$yearID == t), "value"]$value
     }
   }
+}
+
+
 
 #Disturbance
 Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
@@ -115,6 +151,19 @@ for( t in 1:6 ) {
   for( s in 1:5) {
     for( i in 1:nsite[t]){
       Forest_array[ i, t, s] <- Forest[ c( Forest$siteID == i & Forest$scale == scales[s] & Forest$yearID == t), "value"]$value
+    }
+  }
+}
+
+#Corn
+Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
+  pivot_longer(cols = matches("Corn"), names_pattern="(\\d+$)", names_to = "scale")
+
+Corn_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+for( t in 1:no.years ) {
+  for( s in 1:5) {
+    for( i in 1:nsite[t]){
+      Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales[s] & Corn$yearID == t), "value"]$value
     }
   }
 }
@@ -201,7 +250,8 @@ constants <- list(
   ncams=length(unique(ModelingDF2$cam_site_id)),
   nversions=length(unique(cam_version$cam_versionID2))-1,
   nsurveys=nsurveys2,
-  camversion=camversion_array
+  camversion=camversion_array,
+  sp.nknots=50
 )
 
 # Bundle data (counts and covariates).
@@ -209,13 +259,17 @@ data <- list(
   y = Bear_All,
   Year = yr,
   Latitude=Lat,
-  HFI=HFI_array,
+  X=X,
+  Y=Y,
+  Dev=Developed_array,
   Dist=Dist_array,
   Forest=Forest_array,
+  Corn=Corn_array,
   EVI=EVI_array,
   daysactive=daysactive_array,
   occ=occscale_array,
-  catprobs = c(0.2, 0.2, 0.2, 0.2, 0.2)
+  catprobs = c(0.2, 0.2, 0.2, 0.2, 0.2),
+  sp.Z=sp.Z
 )
 
 RNcode <- nimbleCode({
@@ -234,7 +288,7 @@ RNcode <- nimbleCode({
   # regression coefficient for ruffed grouse priority zone
   b_Yr ~ dnorm(0, 2)
   # regression coefficient for Human Footprint Index
-  b_HFI ~ dnorm(0, 2)
+  b_Dev ~ dnorm(0, 2)
   # regression coefficient for Lat
   b_Lat ~ dnorm(0, 2)
   # regression coefficient for Dist
@@ -242,33 +296,30 @@ RNcode <- nimbleCode({
   # regression coefficient for Forest
   b_Forest ~ dnorm(0, 2)
   
+  for (k in 1:sp.nknots) {
+    spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
+  }
   
+  
+  # spline random effect priors
+  sigma.spat.spline.b~dunif(0,100)
   
   ## Priors for detection parameters ##
   # coefficient for occasion
   a_EVI ~ dlogis(0, 1)
   a_daysactive ~ dlogis(0,1)
-  a_occ ~ dlogis(0,1)
   for(v in 1:nversions){
     a_version[v] ~ dlogis(0,1)
   }
   
-  # camera site random effect for both state level and detection level
-  for(c in 1:ncams){
-    eps_N[c] ~ dnorm(0, sd_n)
-    eps_p[c] ~ dnorm(0, sd_p)
-  }
   
-  # hyperprior for abundance random effect
-  sd_n ~ dgamma(1, 2)
-  sd_p ~ dgamma(1, 2)
   
   ## Priors for scales  ##
 
 abundance_scale[1] ~ dcat(catprobs[1:5])
 abundance_scale[2] ~ dcat(catprobs[1:5])
 abundance_scale[3] ~ dcat(catprobs[1:5])
-
+abundance_scale[4] ~ dcat(catprobs[1:5])
 
 for( t in 1:nyear ) { #loop over site then year?
   #state model
@@ -278,14 +329,16 @@ for( t in 1:nyear ) { #loop over site then year?
     log(lambda[i, t]) <-  b_Yr*Year[i, t] +#make this a factor? 
       b_Lat*Latitude[i, t] + 
       #scaled parameters
-      b_HFI*HFI[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + 
+      b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
       #cam_site random effect
-      eps_N[camsites[i,t]] #s[i] - spatial random effect
+      s[camsites[i,t]] #s[i,t] - spatial random effect
+    
+    s[camsites[i,t]] <- inprod(spat.spline.b[1:sp.nknots],Z[camsites[i,t],1:sp.nknots])
   
       #detection model  
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
-        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI*EVI[i,k,t] + a_occ*occ[i,k,t] + eps_p[camsites[i,t]] #EVI and occ probably correlated
+        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI*EVI[i,k,t] #EVI and occ probably correlated
         y[i, k, t] ~ dbern(muy[i, k, t])
       }
     }
@@ -308,14 +361,11 @@ inits <- function() {
              a_version = runif(constants$nversions, -1, 1),
              a_daysactive = runif(1, -1, 1),
              a_EVI = runif(1, -1, 1),
-             a_occ = runif(1, -1, 1),
-             eps_N = rnorm(constants$ncams, 0, 2),
-             eps_p = rnorm(constants$ncams, 0, 2),
-             abundance_scale=rcat(3, c(1/3,1/3,1/3)),
+             spat.spline.b=rep(1,constants$sp.nknots),
+             sigma.spat.spline.b=1,
+             abundance_scale=rcat(4, c(1/3,1/3,1/3)),
              rho = array(data = runif(length(Bear_All), 0, 1),
-                         dim=c(1243,11,6)),
-             sd_n = runif(1, 0, 2),
-             sd_p = runif(1, 0, 2))
+                         dim=c(1243,11,6)))
 }
 
 # parameters to monitor

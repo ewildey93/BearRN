@@ -13,32 +13,58 @@ Zones <- readRDS("./ModelingDF.rds")%>%ungroup()%>%select(cam_site_id, season)%>
   select(cam_site_id, yearID=season, siteID, bear_mgmt_zone_id)%>%mutate(cam_site_id_num = as.numeric(as.factor(cam_site_id)))%>%
   st_drop_geometry()
 
+#make bear range from counties layer
+Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
+Wisconsin2 <- Wisconsin%>%filter(INSIDE_WI_ == 1)
+counties <- get_spatial_data("counties")
+counties$bearrange <- ifelse(counties$COUNTY_NAM %in% 
+                               c("Vernon", "Crawford", "Richland", "Sauk", "Iowa", "Grant",
+                                 "Lafayette", "Dane", "Green", "Rock", "Walworth", "Racine",
+                                 "Kenosha", "Milwaukee", "Waukesha", "Jefferson", "Dodge",
+                                 "Washington", "Ozaukee", "Sheboygan", "Fond du Lac",
+                                 "Green Lake", "Winnebago", "Calumet", "Manitowoc", 
+                                 "Kewaunee", "Door"), 0, 1)
+table(counties$bearrange)
+counties2 <- counties%>%select(COUNTY_NAM, bearrange)
+bearrange <- counties2%>%filter(bearrange == 1)
+bearrange <- st_cast(bearrange, "POLYGON")
+#merge with Wisconsin sf layer to get rid of all the islands
+bearrange2 <- st_intersection(bearrange, Wisconsin2)
 
-ModelingDF <- readRDS("./ModelingDF.rds")%>%st_drop_geometry()%>%ungroup() #this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
-ModelingDF <- ModelingDF[-which(ModelingDF$camera_version %in% c("V2,V4","V2,V3")),] #remove occasions which have multiple camera versions
+ModelingDF <- readRDS("./ModelingDFSpring.rds")%>%ungroup() #this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
+ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(37:44))
+ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
+  st_drop_geometry()%>%ungroup()
+ModelingDF1 <- ModelingDF1[-which(ModelingDF1$camera_version %in% c("V2,V4","V2,V3")),] #remove occasions which have multiple camera versions
 #split up data frame by year and reshape to wide format for detections histories for each year
-dethist <- split(ModelingDF, ModelingDF$year)
+only1occ <- ModelingDF1%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
+nrow(only1occ)
+dethist <- split(ModelingDF1, ModelingDF1$year)
 dethist <- lapply(dethist, function (x) tidyr::pivot_wider(x, id_cols = c(cam_site_id, year), names_from = occ, values_from = BEAR_ADULT_AMT, names_sort = TRUE)%>%ungroup())
 dethistall <- rbindlist(dethist)%>%group_by(year)%>%mutate(siteID=row_number())%>%ungroup()
 Dethistlong <- dethistall%>%pivot_longer(cols=3:13, names_to="occ", values_to="det")%>%
   mutate(yearID=year-2018, det=ifelse(det > 0,1,0), occ=as.numeric(occ))%>%
   arrange(year, cam_site_id, occ)%>%ungroup()
 Dethistlong2 <- Dethistlong%>%group_by(yearID,siteID)%>%arrange(yearID, siteID, is.na(det), occ)%>%mutate(occre=row_number())%>%ungroup()
-ModelingDF%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
+ModelingDF1%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
+nsite <- sapply(dethist,nrow)
 
+maxsites <- max(nsite)
+no.occs <- length(unique(ModelingDF1$occ))
+no.years <- length(unique(ModelingDF1$year))
 # create a 3D matrix for the counts (dim1 = site; dim2 = repeated visit; dim3 = year).
 # Important note: The rows in the different array slices can be different sites among years.
 # Array stores data in multiple dimensions and "nsite" is the number of sites in a
 # given year (e.g. year 2 has 1078 sites).
-Bear_All <- array(NA, dim=c(1243,11,6)) #sites, occasions, years
+Bear_All <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
 
-nsite <- sapply(dethist,nrow)
+
 
 # In the "all" array (above), loop through each year of data (yearID) "t", each weekly
 # count (rep) "j", each site (siteID) "i" (number of sites depends on year; addressed
 # above and incorporated below), and assign counts.
-for( t in 1:6 ) {
-  for( j in 1:11) {
+for( t in 1:no.years ) {
+  for( j in 1:no.occs) {
     for( i in 1:nsite[t]){
       Bear_All[ i, j, t] <- Dethistlong2[ c( Dethistlong2$siteID == i & Dethistlong2$occre == j & Dethistlong2$yearID == t), "det"]$det
     }
@@ -46,17 +72,17 @@ for( t in 1:6 ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF%>%mutate(across(c(8, 12, 14:29), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:35), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
-scalevars <- grep(x = colnames(ModelingDF2), pattern = "_\\d+$", value = TRUE)
+scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
 sitecovcols <- c("cam_site_id", "yearID", "year", "Lat", scalevars)
 #make dataframe of site covariates and add site ID
 sitecovs <- ModelingDF2%>%select(all_of(sitecovcols))%>%distinct()%>%arrange(year, cam_site_id)%>%
   group_by(year)%>%mutate(siteID = row_number())%>%ungroup()%>%relocate(siteID)
 #make a siteID x year matrix of camera site IDs
-camsites <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id = as.numeric(as.factor(cam_site_id)))%>%
-  pivot_wider(values_from = cam_site_id, names_from = yearID)%>%select(-siteID)%>%as.matrix()
+camsiteskey <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id2 = as.numeric(as.factor(cam_site_id)))
+camsites <- camsiteskey%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
 #make a siteID x year matrix of number of occasions
 nsurveys <- ModelingDF2%>%group_by(year)%>%mutate(siteID=as.numeric(factor(cam_site_id)))%>%
   ungroup()%>%group_by(cam_site_id,siteID,year,yearID)%>%summarise(nsurveys=n())%>%arrange(yearID, siteID)%>%ungroup()
@@ -71,24 +97,36 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
         select(-siteID)%>%
         as.matrix()%>%
         unname()
-# make a siteID x year matrix of scaled Latitude
-Lat <- sitecovs%>%select(year, siteID, Lat)%>%
-  pivot_wider(names_from = year, values_from = Lat)%>%
+# make a siteID x year matrix of scaled X and Y coordinate
+X <- sitecovs%>%select(year, siteID, X)%>%
+  pivot_wider(names_from = year, values_from = X)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+Y <- sitecovs%>%select(year, siteID, Y)%>%
+  pivot_wider(names_from = year, values_from = Y)%>%
   select(-siteID)%>%
   as.matrix()%>%
   unname()
 
+
 #spatial spline
-coordsdf <- readRDS("./ModelingDF.rds")%>%cbind(., st_coordinates(.))%>%select("cam_site_id", "X", "Y")%>%distinct()
+coordsdf <- ModelingDF1%>%select("cam_site_id", "X", "Y")%>%distinct()
 coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
-spknots <- read_csv("knots.csv")
+#make grid of potential knots based on bear range
+cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
+knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
+knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
+#calculate knots from potential knots
+bearrangeknots <- cover.design(knots.grid2, 50)
+bearrangeknots <- as.data.frame(bearrangeknots$design)
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
 sd_x <- sd(coordsdf$X)
 mean_y <- mean(coordsdf$Y)
 sd_y <- sd(coordsdf$Y)
 
-spknots <- spknots %>%
+spknots <- bearrangeknots %>%
   mutate(X.scale = (X-mean_x)/sd_x,
          Y.scale = (Y-mean_y)/sd_y) %>%
   dplyr::select(X.scale,Y.scale)
@@ -112,6 +150,18 @@ sp.meanZ <- mean(sp.Z)
 sp.sdZ <- sd(sp.Z)
 sp.Z <- (sp.Z - sp.meanZ)/sp.sdZ #for prediction?
 
+sp.Z2 <- cbind.data.frame(coordsdf$cam_site_id, sp.Z)
+colnames(sp.Z2)[1] <- "cam_site_id"
+sp.Z3 <- left_join(camsiteskey, sp.Z2)
+sp.Zarray <- array(NA, dim=c(maxsites,no.years,nrow(bearrangeknots)))
+for( t in 1:no.years ) {
+  for( k in 1:nrow(spknots)) {
+    for( i in 1:nsite[t]){
+      sp.Zarray[ i, t, k] <- as.numeric(sp.Z3[ c( sp.Z3$siteID == i & sp.Z3$yearID == t), 4+k])
+    }
+  }
+}
+
 #multi-scale state covariates
 #Developed
 Developed <- sitecovs%>%select(yearID, siteID, matches("Developed"))%>%
@@ -127,7 +177,8 @@ for( t in 1:no.years ) {
   }
 }
 
-
+#reduce scales to 500m, 1000m, 5000m
+Developed_array <- Developed_array[,,c(3,4,5)]
 
 #Disturbance
 Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
@@ -142,6 +193,8 @@ Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
     }
   }
 
+  Dist_array <- Dist_array[,,c(3,4,5)]
+  
 #Proportion of Forest
 Forest <- sitecovs%>%select(yearID, siteID, matches("Forest"))%>%
   pivot_longer(cols = matches("Forest"), names_pattern="(\\d+$)", names_to = "scale")
@@ -155,18 +208,21 @@ for( t in 1:6 ) {
   }
 }
 
-#Corn
+Forest_array <- Forest_array[,,c(3,4,5)]
+
+#Corn, only 3 scdales for this it was taking forever to run
 Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
   pivot_longer(cols = matches("Corn"), names_pattern="(\\d+$)", names_to = "scale")
 
 Corn_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
 for( t in 1:no.years ) {
-  for( s in 1:5) {
+  for( s in 1:3) {
     for( i in 1:nsite[t]){
       Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales[s] & Corn$yearID == t), "value"]$value
     }
   }
 }
+
 
 #detection covariates
 detcovcols <- c("cam_site_id", "yearID", "year", "occ","camera_version", "meanEVI", "days_active")
@@ -258,18 +314,14 @@ constants <- list(
 data <- list(
   y = Bear_All,
   Year = yr,
-  Latitude=Lat,
-  X=X,
-  Y=Y,
   Dev=Developed_array,
   Dist=Dist_array,
   Forest=Forest_array,
   Corn=Corn_array,
   EVI=EVI_array,
   daysactive=daysactive_array,
-  occ=occscale_array,
-  catprobs = c(0.2, 0.2, 0.2, 0.2, 0.2),
-  sp.Z=sp.Z
+  catprobs = c(1/3,1/3,1/3),
+  sp.Z=sp.Zarray
 )
 
 RNcode <- nimbleCode({
@@ -289,8 +341,6 @@ RNcode <- nimbleCode({
   b_Yr ~ dnorm(0, 2)
   # regression coefficient for Human Footprint Index
   b_Dev ~ dnorm(0, 2)
-  # regression coefficient for Lat
-  b_Lat ~ dnorm(0, 2)
   # regression coefficient for Dist
   b_Dist ~ dnorm(0, 2)
   # regression coefficient for Forest
@@ -302,7 +352,7 @@ RNcode <- nimbleCode({
   
   
   # spline random effect priors
-  sigma.spat.spline.b~dunif(0,100)
+  sigma.spat.spline.b~dunif(0,10)
   
   ## Priors for detection parameters ##
   # coefficient for occasion
@@ -316,10 +366,10 @@ RNcode <- nimbleCode({
   
   ## Priors for scales  ##
 
-abundance_scale[1] ~ dcat(catprobs[1:5])
-abundance_scale[2] ~ dcat(catprobs[1:5])
-abundance_scale[3] ~ dcat(catprobs[1:5])
-abundance_scale[4] ~ dcat(catprobs[1:5])
+abundance_scale[1] ~ dcat(catprobs[1:3])
+abundance_scale[2] ~ dcat(catprobs[1:3])
+abundance_scale[3] ~ dcat(catprobs[1:3])
+abundance_scale[4] ~ dcat(catprobs[1:3])
 
 for( t in 1:nyear ) { #loop over site then year?
   #state model
@@ -327,7 +377,6 @@ for( t in 1:nyear ) { #loop over site then year?
   for( i in 1:nsite[t] ){
     N[i, t] ~ dpois( lambda[ i, t ] )
     log(lambda[i, t]) <-  b_Yr*Year[i, t] +#make this a factor? 
-      b_Lat*Latitude[i, t] + 
       #scaled parameters
       b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
       #cam_site random effect
@@ -354,8 +403,8 @@ inits <- function() {
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
              b_Yr = runif(1, -1, 1),
-             b_Lat = runif(1, -1, 1),
-             b_HFI = runif(1, -1, 1),
+             b_Corn = runif(1, -1, 1),
+             b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
              a_version = runif(constants$nversions, -1, 1),
@@ -369,8 +418,9 @@ inits <- function() {
 }
 
 # parameters to monitor
-keepers <- c("lambda", 'b_HFI', "b_Lat", "b_Yr", "b_Dist", "b_Forest", 
-             "a_version", "a_daysactive", "a_EVI", "a_occ",
+keepers <- c( 'b_Dev', "b_Yr", "b_Dist", "b_Forest", "b_Corn",
+             "spat.spline.b",
+             "a_version", "a_daysactive", "a_EVI", 
              "abundance_scale")
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
@@ -379,7 +429,7 @@ keepers <- c("lambda", 'b_HFI', "b_Lat", "b_Yr", "b_Dist", "b_Forest",
 # see: https://groups.google.com/g/nimble-users/c/RHH9Ybh7bSI
 nc <- 3 # number of chains
 nb <- 5000 # number of initial MCMC iterations to discard
-ni <- 50000 # total number  of iterations
+ni <- 75000 # total number  of iterations
 
 # .......................................................................
 # RUN MODEL

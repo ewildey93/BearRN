@@ -162,6 +162,7 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            thin= 5,
                            inits=inits(),
                            WAIC = TRUE)
+saveRDS(samples, "./JustSpatialSpline.rds")
 mcmc.output <- nimble::runMCMC(c_model_mcmc, 
                               nburnin = 0, 
                               niter = 100, 

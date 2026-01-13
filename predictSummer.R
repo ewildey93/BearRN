@@ -1,9 +1,44 @@
-library(fields)
-library(leaflet)
+####################################predict EVI spline############################################
+#predicting EVI spline
+EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
+pred.data <- expand.grid(camversion=1, daysactive=0.2211643, EVI=EVI.pred)
+# prediction dataset for spatial smoothing
+pred.EVI.Z_K <- (abs(outer(as.numeric(pred.data$EVI),EVI.knots,"-")))^3
 
-samples <- readRDS("./RNsamplesFullModelBearRangeNoXY.rds")
-samples2 <- samples[[1]]
+pred.EVI.Z <- t(solve(EVI.sqrt.OMEGA_all,t(pred.EVI.Z_K)))
 
+# standardize for better performance
+pred.EVI.Z <- (pred.EVI.Z-meanZ)/sdZ
+pred.data2 <- cbind(pred.data, pred.EVI.Z)
+
+#get mean response of spline
+MCMCsummary(samples[[1]],params = "b", round = 3, ISB = T)
+bmeans <- MCMCsummary(samples[[1]],params = "b", round = 3, ISB = T)
+camversionmeans <- MCMCsummary(samples[[1]],params = "a_version", round = 3, ISB = T)
+daysactivemean <- MCMCsummary(samples[[1]],params = "a_daysactive", round = 3, ISB = T)
+EVImean <- MCMCsummary(samples[[1]],params = "a_EVI", round = 3, ISB = T)
+rho.mean <- plogis(camversionmeans$mean[1] + daysactivemean$mean*0.2211643 + EVImean$mean*pred.data$EVI +bmeans$mean[1]*pred.EVI.Z[,1] + bmeans$mean[2]*pred.EVI.Z[,2] + bmeans$mean[3]*pred.EVI.Z[,3] +
+                     bmeans$mean[4]*pred.EVI.Z[,4] + bmeans$mean[5]*pred.EVI.Z[,5])
+#get CRIs for spline
+#combine MCMC chains into one
+allchains <- MCMCchains(samples[[1]], params =c("a_version", "a_daysactive", "a_EVI", "b"))
+#loop through estimated parameter at each iteration
+rho.preds <- array(dim = c(length(pred.data$EVI), length(allchains[,"a_version[1]"])))
+for(j in 1:length(allchains[,"a_version[1]"])){
+  rho.preds[,j] <- plogis(allchains[,"a_version[1]"][j] + allchains[,"a_daysactive"][j]*0.2211643 + allchains[,"a_EVI"][j]*pred.data$EVI + 
+                            allchains[,"b[1]"][j]*pred.EVI.Z[,1] + allchains[,"b[2]"][j]*pred.EVI.Z[,2] + allchains[,"b[3]"][j]*pred.EVI.Z[,3] +
+                            allchains[,"b[4]"][j]*pred.EVI.Z[,4] + allchains[,"b[5]"][j]*pred.EVI.Z[,5])
+}
+#calculate interval
+CL <- apply(rho.preds, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+rhoplotdf <- cbind(pred.data2, rho.mean, t(CL))
+rhoplotdf$EVI <- rhoplotdf$EVI * attr(EVI2$meanEVI, "scaled:scale") + attr(EVI2$meanEVI, "scaled:center")
+colnames(rhoplotdf)[10:11] <- c("CL2.5", "CL97.5")
+ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="blue") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.3,fill="blue", color="blue")
+
+######################################  predict spatial spline #####################################################
 #make prediction grid for spatial spline
 cellsize <- rep(sqrt(5.18e7), 2)#20mi^2
 predict.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
@@ -18,15 +53,15 @@ predict.grid2.polys <- as.data.frame(do.call(rbind, st_intersection(predict.grid
 predict.grid3 <- predict.grid2 %>%
   mutate(X.scale = (X-mean_x)/sd_x,
          Y.scale = (Y-mean_y)/sd_y)
-sp.cov.dist_pred = fields::rdist(x1=cbind(predict.grid3$X.scale,predict.grid3$Y.scale),x2=bearrangeknots2)
+sp.cov.dist_pred = fields::rdist(x1=cbind(predict.grid3$X.scale,predict.grid3$Y.scale),x2=spknots)
 sp.Z_K.pred = sp.cov.dist_pred^2*log(sp.cov.dist_pred) # basis
 sp.Z.pred <- t(solve(sp.sqrt.omega_all,t(sp.Z_K.pred)))
 sp.Z.pred <- (sp.Z.pred - sp.meanZ)/sp.sdZ #for prediction?
-# bXY <- MCMCsummary(samples2, 
-#                    params = c('b_X', 'b_Y'),
-#                    ISB = FALSE,
-#                    round=2)
-spatspline.bs <- MCMCsummary(samples, 
+bXY <- MCMCsummary(samples[[1]], 
+                   params = c('b_X', 'b_Y'),
+                   ISB = FALSE,
+                   round=2)
+spatspline.bs <- MCMCsummary(samples[[1]], 
                              params = c('spat.spline.b'),
                              ISB = TRUE,
                              round=2)
@@ -34,44 +69,20 @@ lambda.pred.spline <- bXY$mean[1]*predict.grid3$X.scale + bXY$mean[2]*predict.gr
 
 lambda.pred.spline2 <- exp(lambda.pred.spline + inprodsplineman)
 inprodspline <- sp.Z.pred%*%spatspline.bs$mean
-lambda.pred.spline <- exp(inprodspline)
-predict.grid3$lambda.pred <- lambda.pred.spline
+predict.grid3$lambda.pred <- lambda.pred.spline2
 predict.grid4 <- st_buffer(st_as_sf(predict.grid3, coords=c("X", "Y"), crs=3071), dist = cellsize/2)
-plot(predict.grid4["lambda.pred"], add=TRUE)
-plot(st_geometry(bearrange2))
+plot(predict.grid4["lambda.pred"])
+plot(st_geometry(bearrange2), add=TRUE)
 
-PR <- rnorm(15000, 0, 2)
-MCMCtrace(samples2, 
-          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
-          ISB = FALSE,
-          exact = TRUE,
-          priors = PR,
-          pdf = FALSE,
-          Rhat = TRUE,
-          n.eff = TRUE)
-MCMCtrace(samples2, 
-          params = c('spat.spline.b[1]', 'spat.spline.b[2]', 'spat.spline.b[3]', 'spat.spline.b[4]', 'spat.spline.b[5]'),
-          ISB = FALSE,
-          exact = TRUE,
-          pdf = FALSE,
-          Rhat = TRUE,
-          n.eff = TRUE)
-MCMCtrace(samples2, 
-          params = c('abundance_scale'),
-          ISB = TRUE,
-          exact = TRUE,
-          pdf = FALSE,
-          Rhat = TRUE,
-          n.eff = TRUE)
-MCMCtrace(samples2, 
-          params = c("a_version", "a_daysactive", "a_EVI"),
-          ISB = TRUE,
-          exact = TRUE,
-          pdf = FALSE,
-          Rhat = TRUE,
-          n.eff = TRUE)
-
-
+numpal <- colorNumeric(
+  palette = "viridis",                          # Use a ColorBrewer palette name
+  domain = predict.grid4$lambda.pred                     # The numeric range of values
+)
+leaflet() %>% 
+  # addProviderTiles("OpenStreetMap.Mapnik") %>%
+  addTiles() %>%
+  addPolygons(data=st_transform(bearrange2, 4326), color="black", fillColor=NA)%>%
+  addPolygons(data=st_transform(predict.grid4, crs=4326), fillColor=~numpal(lambda.pred), fillOpacity = 1)
 
 ############################ scrap ######################################
 library(leaflet)
@@ -93,37 +104,9 @@ leaflet() %>%
   addCircleMarkers(data=st_transform(predictgrid2, 4326), fillColor = "yellow", fillOpacity = 1,   stroke=F, radius=3)%>%
   addPolygons(data=st_transform(bearrange2, crs=4326))
 
-numpal <- colorNumeric(
-  palette = "viridis",                          # Use a ColorBrewer palette name
-  domain = predict.grid4$lambda.pred                     # The numeric range of values
-)
-leaflet() %>% 
-  # addProviderTiles("OpenStreetMap.Mapnik") %>%
-  addTiles() %>%
-  addPolygons(data=st_transform(bearrange2, 4326), color="black", fillColor=NA)%>%
-  addPolygons(data=st_transform(predict.grid4, crs=4326), fillColor=~numpal(lambda.pred), fillOpacity = 1)
 
 
-#make bear range from counties layer
-Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
-Wisconsin2 <- Wisconsin%>%filter(INSIDE_WI_ == 1)
-counties <- get_spatial_data("counties")
-counties$bearrange <- ifelse(counties$COUNTY_NAM %in% 
-                               c("Vernon", "Crawford", "Richland", "Sauk", "Iowa", "Grant",
-                                 "Lafayette", "Dane", "Green", "Rock", "Walworth", "Racine",
-                                 "Kenosha", "Milwaukee", "Waukesha", "Jefferson", "Dodge",
-                                 "Washington", "Ozaukee", "Sheboygan", "Fond du Lac",
-                                 "Green Lake", "Winnebago", "Calumet", "Manitowoc", 
-                                 "Kewaunee", "Door"), 0, 1)
-table(counties$bearrange)
-counties2 <- counties%>%select(COUNTY_NAM, bearrange)
-bearrange <- counties2%>%filter(bearrange == 1)
-bearrange <- st_cast(bearrange, "POLYGON")
-#merge with Wisconsin sf layer to get rid of all the islands
-bearrange2 <- st_intersection(bearrange, Wisconsin2)
-#join camsites to bear range to get rid of camera sites outside of bear range
-camsitessf <- st_as_sf(ModelingDF, coords=c("X","Y"),crs=3071)%>%distinct(cam_site_id, geometry)
-camsites.bearrange <- st_join(camsitessf, bearrange2)%>%drop_na(bearrange)
+
 
 inprodsplineman <- spatspline.bs$mean[1]*sp.Z.pred[,1] + spatspline.bs$mean[2]*sp.Z.pred[,2] + 
   spatspline.bs$mean[3]*sp.Z.pred[,3] + spatspline.bs$mean[4]*sp.Z.pred[,4] + 
@@ -150,16 +133,3 @@ inprodsplineman <- spatspline.bs$mean[1]*sp.Z.pred[,1] + spatspline.bs$mean[2]*s
   spatspline.bs$mean[45]*sp.Z.pred[,45] + spatspline.bs$mean[46]*sp.Z.pred[,46] + 
   spatspline.bs$mean[47]*sp.Z.pred[,47] + spatspline.bs$mean[48]*sp.Z.pred[,48] + 
   spatspline.bs$mean[49]*sp.Z.pred[,49] + spatspline.bs$mean[50]*sp.Z.pred[,50]
-
-
-#see where camsites with bad initial values are
-badinits <- c('lambda[138, 1]', 'lambda[1255, 1]', 'lambda[1309, 1]', 'lambda[1107, 2]', 'lambda[1108, 2]',
-              'lambda[1209, 3]', 'lambda[1210, 3]', 'lambda[1303, 4]', 'lambda[1289, 5]', 'lambda[1290, 5]',
-              'lambda[1492, 6]')
-badinits <- data.frame(siteID=str_extract(string = badinits, pattern = "(lambda\\[)(\\d+)", group = 2),
-                       yearID=str_extract(string = badinits, pattern = "(lambda\\[\\d+, )(\\d+)", group = 2))
-badinits2 <- camsiteskey%>%filter(paste0(siteID, yearID) %in% paste0(badinits$siteID, badinits$yearID))
-#3/4 bad initis down in kenosha county, other one in superior, WI and has lambda of 0.58
-badinits3 <- camsitessf%>%filter(cam_site_id %in% badinits2$cam_site_id)
-notbadinits <- camsitessf%>%filter(!(cam_site_id %in% badinits2$cam_site_id))
-badinitssitecovs <- sitecovs%>%filter(paste0(siteID, yearID) %in% paste0(badinits$siteID, badinits$yearID))

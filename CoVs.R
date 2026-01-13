@@ -14,17 +14,18 @@ library(lubridate)
 library(mgcv)
 library(rlandfire)
 library(data.table)
+library(CropScapeR)
 
 
 buffers <- c(100,500,1000,2500,5000) # buffer sizes in meters, buffer size 5000 not enough memory
-df <- read_rds(paste(getwd(), "data_clean/BearCPUESpring2019-2024.rds", sep="/")) #4/15-6/30
+df <- read_rds(paste(getwd(), "BearCPUESpring2019-2024.rds", sep="/")) #4/15-6/30
 BEARCPUE <- df%>%filter(ppn_classified >= 0.95  & year > 2018)#& days_active > 4
 BEARCPUE2 <- BEARCPUE%>%group_by(cam_site_id, year)%>%add_tally(name = "n.occ")%>%
   group_by(cam_site_id)%>%add_tally(name="n.occ.total")
 BEARCPUE3 <- BEARCPUE2%>%filter(n.occ > 5)%>%select(1:3,4,5,8,13,14,15:18)#1:3,5,8,14,15,16,17,18
 camsites <- BEARCPUE3%>%distinct(cam_site_id, geometry)
-camsiteyears <- BEARCPUE3%>%group_by(year)%>%summarise(n=n_distinct(cam_site_id))
-
+BEARCPUE3%>%group_by(year)%>%summarise(n=n_distinct(cam_site_id))
+camsiteyears <- BEARCPUE3%>%ungroup()%>%distinct(cam_site_id, year, geometry)%>%group_split(year)%>%setNames(2019:2024)
 
 # camsite_buffers <- st_buffer(camsites, dist = 500,endCapStyle = "SQUARE")
 # st_write(camsite_buffers, "./Bearcamsite_buffers.shp")
@@ -180,6 +181,7 @@ lm_output <-
 # join pland back to camera sf object
 forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods","AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods",
                "MixedDeciduousConiferousForest", "MixedDeciduousConiferousForestedWetland")
+developedLCs <- c("DevelopedHighIntensity","DevelopedLowIntensity")
 
 lm_output2 <- cbind(lm_output, lapply(buffers, function(x) rowSums(lm_output[,paste0(forestLCs, "_", x)])))
 forestcols <- grep(pattern = "c\\(", x = colnames(lm_output2))
@@ -187,6 +189,14 @@ colnames(lm_output2)[forestcols] <- paste0("Forest", "_",buffers)
 
 ForestProp <- lm_output2[,c(1,forestcols)]
 camsites <- left_join(camsites, ForestProp, by="cam_site_id")
+
+lm_output2 <- cbind(lm_output, lapply(buffers, function(x) rowSums(lm_output[,paste0(developedLCs, "_", x)])))
+devcols <- grep(pattern = "c\\(", x = colnames(lm_output2))
+colnames(lm_output2)[devcols] <- paste0("Developed", "_",buffers)
+
+DevelopedProp <- lm_output2[,c(1,devcols)]
+camsites <- left_join(camsites, DevelopedProp, by="cam_site_id")
+
 
 
 #shared Wiscland level 2-3 landcover class: c(DevelopedHighIntensity, DevelopedLowIntensity, Cranberries, 
@@ -247,12 +257,6 @@ lm_output <-
   ) %>%
   # clean up names
   rename(cam_site_id = plot_id)
-
-
-# join pland back to camera sf object
-forestcols <- c("BroadleavedDeciduousForest", "AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods",
-                "MixedDeciduousConiferousForest", "MixedDeciduousConiferousForestedWetland")
-camsites <- left_join(camsites, lm_output[,-c(forestcols)], by="cam_site_id")
 
 
 
@@ -565,6 +569,85 @@ lm_output <-
 
 lm_output <- lm_output%>%select(-matches("\\+"))
 colnames(lm_output)[2:6] <- gsub(x = colnames(lm_output)[2:6], pattern = "0-10", "Dist")
+
+#########################################################################################
+####                             CropScape                                          #####
+#########################################################################################
+lapply(unique(BEARCPUE$year), function (x) GetCDLData(aoi = 55, year = x, type = 'f', format = 'raster', crs = '+init=epsg:4326',
+                                                      save_path=paste0("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/Crops", x, ".tif")))#aoi=FIPS code for WI
+GetCDLData(aoi = 55, year = 2019, type = 'f', format = 'raster', crs = '+init=epsg:4326',
+           save_path=paste0("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/Crops", "2019", ".tif"))
+
+CropRasts <- list.files("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/", full.names = TRUE)
+CropRasts2 <- lapply(CropRasts, function (x) rast(x))
+data("linkdata")
+camsiteyearsCDL <- lapply(camsiteyears, function (x) st_transform(x, crs(CropRasts2[[1]])))
+
+# Wiscland 3 prop land cover
+buffers2=buffers %>% 
+  set_names()
+lm_output <- 
+  mapply(x= CropRasts2, y=camsiteyearsCDL,
+         # produce a dataframe after this is all done
+         \(x,y) lapply(buffers2[3:5], 
+                       \(z) sample_lsm(
+                         # raster layer
+                         landscape = x,
+                         # camera locations
+                         y = y,
+                         # get landcover class level metrics
+                         level = "class",
+                         # return NA values for classes not in buffer
+                         # all_classes = TRUE, 
+                         # camera site IDs here
+                         plot_id = y$cam_site_id,
+                         # can do multiple metrics at once
+                         what = 'lsm_c_pland',
+                         # buffer sizes to use
+                         size = z, 
+                         # default is square buffer
+                         shape = "circle", 
+                         # turn warnings on or off
+                         verbose = FALSE 
+                       )
+         ), SIMPLIFY=FALSE
+  )
+names(lm_output) <- 2019:2024
+
+lm_output2 <- rbindlist(lapply(lm_output, function(x) rbindlist(x, idcol = "buffer_size")), idcol="year")
+lm_output2 <- left_join(lm_output2, linkdata, by=join_by(class==MasterCat))
+Corn <- lm_output2[grep(pattern = "Corn", x = lm_output2$Crop, ignore.case = TRUE),]
+Corn2 <- Corn%>%group_by(year, buffer_size, plot_id)%>%summarise(CornProp=sum(value))
+Corn2$buffer_size <- as.numeric(Corn2$buffer_size)
+# in this data frame plot_id = camera ID
+# class = landcover type
+# value = % of that landcover type in the buffer
+# make each landcover type x buffer into a column
+Corn3 <- 
+  Corn2 %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    names_from = buffer_size,
+    names_prefix="Corn",
+    values_from = CornProp,
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  ) %>%
+  # clean up names
+  rename(cam_site_id = plot_id)
+Corn3$season <- as.numeric(Corn3$year)-2018
+Corn3$year <- as.numeric(Corn3$year)
+ModelingDFNew <- left_join(ModelingDF, st_drop_geometry(camsites[,c(1,8:12)]))
+ModelingDFNew2 <- left_join(ModelingDFNew, Corn3)
+colSums(is.na(ModelingDFNew2))
+CornNA <- ModelingDFNew2[is.na(ModelingDFNew2$Corn1000),]
+CornNA2 <- lm_output2[paste0(lm_output2$plot_id, lm_output2$year) %in% paste0(CornNA$cam_site_id, CornNA$year),]
+ModelingDFNew2 <- ModelingDFNew2%>%mutate(across(matches("Corn"), ~replace_na(.x, 0)))
+saveRDS(ModelingDFNew2, "./ModelingDFSpring.rds")
+
+BEARCPUE5 <- left_join(BEARCPUE4, Corn3)
+BEARCPUE5 <- BEARCPUE5%>%mutate(across(matches("Corn"), ~replace_na(.x, 0)))
 
 ##########################################################################################
 ####                   save sitecovs and detcovs  for use in modeling                #####

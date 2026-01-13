@@ -1,5 +1,6 @@
 library(fields)
 library(leaflet)
+library(stars)
 
 samples <- readRDS("./RNsamplesFullModelBearRangeNoXY.rds")
 samples2 <- samples[[1]]
@@ -37,7 +38,8 @@ inprodspline <- sp.Z.pred%*%spatspline.bs$mean
 lambda.pred.spline <- exp(inprodspline)
 predict.grid3$lambda.pred <- lambda.pred.spline
 predict.grid4 <- st_buffer(st_as_sf(predict.grid3, coords=c("X", "Y"), crs=3071), dist = cellsize/2)
-plot(predict.grid4["lambda.pred"], add=TRUE)
+predict.grid5 <- st_as_stars(predict.grid4)
+plot(predict.grid4["lambda.pred"])
 plot(st_geometry(bearrange2))
 
 PR <- rnorm(15000, 0, 2)

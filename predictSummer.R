@@ -1,3 +1,19 @@
+library(landscapemetrics)
+library(stars)
+library(sf)
+library(dplyr)
+library(terra)
+library(readxl)
+library(rlandfire)
+library(CropScapeR)
+library(purrr)
+library(tidyr)
+library(leaflet)
+library(ggplot2)
+
+
+
+
 ####################################predict EVI spline############################################
 #predicting EVI spline
 EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
@@ -84,7 +100,309 @@ leaflet() %>%
   addPolygons(data=st_transform(bearrange2, 4326), color="black", fillColor=NA)%>%
   addPolygons(data=st_transform(predict.grid4, crs=4326), fillColor=~numpal(lambda.pred), fillOpacity = 1)
 
+
+#---------------------------------------------------------------------
+#                       predict overall lambda                        
+#---------------------------------------------------------------------
+predict.centers <- st_make_grid(st_union(bearrange2), cellsize=c(2000,2000), what="centers")
+plot(st_geometry(predict.centers))
+predict.lambda <- as.data.frame(do.call(rbind, st_intersection(predict.centers, bearrange2)))%>%rename("X"="V1", "Y"="V2")
+predict.lambda.sf <- st_as_sf(predict.lambda, coords=c("X", "Y"), crs=3071)
+predict.lambda.sf2 <- st_join(predict.lambda.sf, st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))
+#get Zs for spatial spline
+predict.lambda2 <- predict.lambda %>%
+  mutate(X.scale = (X-mean_x)/sd_x,    #need mean_xy and sd_xy from original data frame of camera points
+         Y.scale = (Y-mean_y)/sd_y)
+sp.cov.dist_predall = fields::rdist(x1=cbind(predict.lambda2$X.scale,predict.lambda2$Y.scale),x2=bearrangeknots2)
+sp.Z_K.predall = sp.cov.dist_predall^2*log(sp.cov.dist_predall) # basis
+sp.Z.predall <- t(solve(sp.sqrt.omega_all,t(sp.Z_K.predall)))
+sp.Z.predall <- (sp.Z.predall - sp.meanZ)/sp.sdZ  #standardize on same scale as camera data
+spatspline.bs <- MCMCsummary(samples,  
+                             params = c('spat.spline.b'),
+                             ISB = TRUE,
+                             round=2)
+inprodspline <- sp.Z.predall%*%spatspline.bs$mean
+
+#-------------------------fixed effects
+# Forest and Developed land cover
+yearX <- unique(sitecovs$year)
+b_Fixed <- MCMCsummary(samples, 
+                     params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
+                     ISB = TRUE,
+                     round=2)
+MCMCtrace(samples, 
+          params = c('abundance_scale'),
+          ISB = TRUE,
+          exact = TRUE,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+Wiscland3 <- get_spatial_data(layer_name = 'wiscland2', level = 3)
+Wiscland3.3071 <- project(Wiscland3, "EPSG:3071")
+WisclandGuide <- read_xlsx("C:/Users/wildeefb/Documents/GeoSpatial/wiscland2/user_guide/Wiscland2 Color Scheme.xlsx",
+                           range = "B2:C70", .name_repair = make.names)
+lm_pred <- sample_lsm(
+  # raster layer
+  landscape = Wiscland3.3071,
+  # camera locations
+  y = predict.lambda.sf,
+  # get landcover class level metrics
+  level = "class",
+  # return NA values for classes not in buffer
+  # all_classes = TRUE, 
+  # can do multiple metrics at once
+  what = 'lsm_c_pland',
+  # buffer sizes to use
+  size = 500, 
+  # default is square buffer
+  shape = "square", 
+  # turn warnings on or off
+  verbose = FALSE 
+)
+lm_output <- left_join(lm_pred, WisclandGuide, by= join_by(class == dn.label))
+lm_output$label <- gsub(pattern = "\\W", replacement = "", x = lm_output$label)
+
+lm_output <- 
+  lm_output %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    id_cols = plot_id,
+    names_from = c(label),
+    values_from = c(value),
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  )
+
+forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods","AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods",
+               "MixedDeciduousConiferousForest", "MixedDeciduousConiferousForestedWetland")
+developedLCs <- c("DevelopedHighIntensity","DevelopedLowIntensity")
+
+forest.pred <- rowSums(lm_output[,forestLCs])
+forest.pred2 <- (forest.pred - attr(sitecovs$Forest_500, "scaled:center"))/attr(sitecovs$Forest_500, "scaled:scale")
+predict.lambda3 <- cbind(predict.lambda2, forest.pred2)
+
+dev.pred <- rowSums(lm_output[,developedLCs])
+dev.pred2 <- (dev.pred - attr(sitecovs$Developed_500, "scaled:center"))/attr(sitecovs$Developed_500, "scaled:scale")
+predict.lambda3 <- cbind(predict.lambda3, dev.pred2)
+
+#Disturbance
+aoi <- getAOI(Wisconsin)
+products <- "HDIST2023"
+email <- "eli.wildey@wisconsin.gov"
+projection <- 3071
+resolution <- 90
+path <- tempfile(fileext = ".zip")#"C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
+hdist2023 <-landfireAPIv2(products = products,
+                          aoi = aoi, 
+                          email = email,
+                          projection = projection, 
+                          resolution = resolution,
+                          path = path,
+                          verbose = TRUE)
+lf_dir <- file.path(tempdir(), "lf")
+utils::unzip(path, exdir = lf_dir)
+hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
+                                full.names = TRUE, 
+                                recursive = TRUE))
+dbf <- list.files(lf_dir, pattern = ".dbf$",
+                  full.names = TRUE,
+                  recursive = TRUE)
+dbf_tbl  <- foreign::read.dbf(dbf)
+HDistLU <- read.csv("C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/LF2024_HDist24.csv")
+dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
+levels(hdist) <- dbf_tbl[,c(1,10)]
+hdist <- addCats(hdist, value=dbf_tbl[,c(4:9)])
+cats(hdist)
+activeCat(hdist)
+levels(hdist)
+plot(hdist)
+activeCat(hdist) <- 1
+
+
+hdist2 <- ifel(hdist > 1, 1, hdist)
+# Wiscland2 has 30m resolution
+
+# Wiscland 3 prop land cover
+lm_dist <- sample_lsm(
+      # raster layer
+      landscape = hdist2,
+      # camera locations
+      y = predict.lambda.sf,
+      # get landcover class level metrics
+      level = "class",
+      # return NA values for classes not in buffer
+      # all_classes = TRUE, 
+      # can do multiple metrics at once
+      what = 'lsm_c_pland',
+      # buffer sizes to use
+      size = 1000, 
+      # default is square buffer
+      shape = "square", 
+      # turn warnings on or off
+      verbose = FALSE 
+    )
+
+
+lm_dist$label <- ifelse(lm_dist$class == 0, "10+", "0-10")
+
+# in this data frame plot_id = camera ID
+# class = landcover type
+# value = % of that landcover type in the buffer
+# make each landcover type x buffer into a column
+lm_dist <- 
+  lm_dist %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    id_cols = plot_id,
+    names_from = c(label),
+    values_from = c(value),
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  )
+
+lm_dist <- lm_dist%>%select(-matches("\\+"))
+colnames(lm_dist)[2] <- gsub(x = colnames(lm_dist)[2], pattern = "0-10", "Dist1000")
+lm_dist2 <- (lm_dist$Dist1000 - attr(sitecovs$Dist_1000, "scaled:center"))/attr(sitecovs$Dist_1000, "scaled:scale")
+
+predict.lambda3 <- cbind(predict.lambda3, lm_dist2)
+
+#Corn
+CropRasts <- list.files("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/", full.names = TRUE)
+CropRasts2 <- lapply(CropRasts, function (x) rast(x))
+data("linkdata")
+predict.lambdaCDL <- st_coordinates(st_transform(predict.lambda.sf, crs=crs(CropRasts2[[1]])))
+
+
+lm_corn <- 
+  map_dfr(.x= CropRasts2, 
+         # produce a dataframe after this is all done
+         ~sample_lsm(
+                         # raster layer
+                         landscape = .x,
+                         # camera locations
+                         y = predict.lambdaCDL,
+                         # get landcover class level metrics
+                         level = "class",
+                         # return NA values for classes not in buffer
+                         # all_classes = TRUE, 
+                         # can do multiple metrics at once
+                         what = 'lsm_c_pland',
+                         # buffer sizes to use
+                         size = 500, 
+                         # default is square buffer
+                         shape = "square", 
+                         # turn warnings on or off
+                         verbose = FALSE 
+                       ), .id = "year"
+         )
+
+
+
+lm_corn2 <- left_join(lm_corn, linkdata, by=join_by(class==MasterCat))
+Corn.pred <- lm_corn2[grep(pattern = "Corn", x = lm_corn2$Crop, ignore.case = TRUE),]
+Corn.pred2 <- Corn.pred%>%group_by(year,  plot_id)%>%summarise(CornProp=sum(value))
+Corn.pred2$plot_id <- factor(Corn.pred2$plot_id, levels=1:nrow(predict.lambda))
+Corn.pred3<- Corn.pred2%>%group_by(year)%>%complete(., plot_id, fill = list(CornProp=0))%>%ungroup()
+# in this data frame plot_id = camera ID
+# class = landcover type
+# value = % of that landcover type in the buffer
+# make each landcover type x buffer into a column
+Corn.pred4 <- 
+  Corn.pred3 %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    names_from = year,
+    names_prefix="Corn",
+    values_from = CornProp,
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  ) 
+
+Corn.pred5 <- as.data.frame(Corn.pred4%>%mutate(across(matches("Corn"), ~(. - attr(sitecovs$Corn500, "scaled:center"))/attr(sitecovs$Corn500, "scaled:scale"))))
+
+
+
+lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
+  lambda <- exp(b_Fixed$mean[5]*yearX[i] + b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
+                b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*as.numeric(Corn.pred5[,i+1]) +
+                b_Fixed$mean[4]*predict.lambda3$lm_dist2 + sp.Z.predall%*%spatspline.bs$mean))
+names(lambda.predicted.grid) <- 2019:2024
+lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
+predict.lambda4 <- cbind(predict.lambda3, lambda.predicted.grid2)
+colnames(predict.lambda4)[10:15] <- paste0("TotalLambda", 2019:2024)
+
+#####################################################################################
+#                             abundance by zone                                     #
+#####################################################################################
+#add zone information to predictions
+predict.lambda5 <- cbind(predict.lambda4, predict.lambda.sf2$bear_mgmt_zone_id)
+colnames(predict.lambda5)[16] <- "Zone"
+popbyzone <- predict.lambda5%>%group_by(Zone)%>%summarise(across(matches("TotalLambda"), ~sum(.x)))%>%drop_na()
+total <- data.frame("Zone"="Total", t(colSums(popbyzone[,2:7])))
+popbyzone <- rbind(popbyzone, total)
+popbyzone2 <- pivot_longer(popbyzone, cols = -c(Zone), names_to = "Year", values_to = "lambda")
+popbyzone2$Year <- as.numeric(gsub(x = popbyzone2$Year, pattern = "TotalLambda", replacement = ""))
+ggplot(filter(popbyzone2, Zone != "Total"), aes(x=Year, y=lambda, colour = Zone)) + geom_point() + geom_line()
+
+#####################################################################################
+#                   spatial prediction across years                                 #
+#####################################################################################
+predict.lambda4SF <- st_as_sf(predict.lambda4, coords=c("X", "Y"), crs=3071)
+predict.lambda4.polys <- st_buffer(st_as_sf(predict.lambda4, coords=c("X", "Y"), crs=3071), dist = 1000)
+predict.lambda4stars <- st_as_stars(predict.lambda4.polys)
+plot(predict.lambda4.polys["TotalLambda2019"], key.pos = 1)
+plot(st_geometry(bearrange2))
+plot(predict.lambda4stars["TotalLambda2024"])
+saveRDS(lambda.predicted.grid, "./predictedlambdasSummer.rds")
+
+
+
 ############################ scrap ######################################
+#spatial spline
+coordsdf <- ModelingDF1%>%select("cam_site_id", "X", "Y")%>%distinct()
+coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
+#make grid of potential knots based on bear range
+cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
+knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
+knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
+#calculate knots from potential knots
+bearrangeknots <- cover.design(knots.grid2, 50)
+bearrangeknots2 <- as.data.frame(bearrangeknots$design)
+# scale coordinates 
+mean_x <- mean(coordsdf$X)
+sd_x <- sd(coordsdf$X)
+mean_y <- mean(coordsdf$Y)
+sd_y <- sd(coordsdf$Y)
+
+bearrangeknots2 <- bearrangeknots2 %>%
+  mutate(X.scale = (X-mean_x)/sd_x,
+         Y.scale = (Y-mean_y)/sd_y) %>%
+  dplyr::select(X.scale,Y.scale)
+
+dat <- coordsdf %>%
+  mutate(X.scale = (X-mean_x)/sd_x,
+         Y.scale = (Y-mean_y)/sd_y)
+
+# get matrix ready for spatial smoothing
+spknots.dist <- dist(bearrangeknots2,"euclidean",diag=T,upper=T)
+sp.omega_all = spknots.dist^2*log(spknots.dist) # basis
+sp.svd.omega_all <- svd(sp.omega_all)
+sp.sqrt.omega_all <- t(sp.svd.omega_all$v %*%
+                         (t(sp.svd.omega_all$u)*sqrt(sp.svd.omega_all$d)))
+
+# now for spline for data
+sp.cov.dist_all = fields::rdist(x1=cbind(dat$X.scale,dat$Y.scale),x2=bearrangeknots2)
+sp.Z_K = sp.cov.dist_all^2*log(sp.cov.dist_all) # basis
+sp.Z <- t(solve(sp.sqrt.omega_all,t(sp.Z_K)))
+sp.meanZ <- mean(sp.Z)
+sp.sdZ <- sd(sp.Z)
+sp.Z <- (sp.Z - sp.meanZ)/sp.sdZ
+
+
+
 library(leaflet)
 Wisc.BearRange4326 <- st_transform(bearrange2, crs=4326)
 numpal <- colorNumeric(
@@ -104,7 +422,13 @@ leaflet() %>%
   addCircleMarkers(data=st_transform(predictgrid2, 4326), fillColor = "yellow", fillOpacity = 1,   stroke=F, radius=3)%>%
   addPolygons(data=st_transform(bearrange2, crs=4326))
 
-
+predict.lambdaNAzone <- predict.lambda.sf2[is.na(predict.lambda.sf2$bear_mgmt_zone_id),]
+bearzones <- get_spatial_data("bear_zones")
+leaflet() %>% 
+  # addProviderTiles("OpenStreetMap.Mapnik") %>%
+  addTiles() %>%
+  addCircleMarkers(data=st_transform(predict.lambdaNAzone, 4326), fillColor = "yellow", fillOpacity = 1,   stroke=F, radius=3)%>%
+  addPolygons(data=st_transform(bearzones, crs=4326), label = bearzones$bear_mgmt_zone_id)
 
 
 

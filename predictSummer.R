@@ -10,9 +10,11 @@ library(purrr)
 library(tidyr)
 library(leaflet)
 library(ggplot2)
+library(MCMCvis)
+library(data.table)
 
 
-
+samples <- readRDS("./RNsamplesFullModelBearRange2.rds")
 
 ####################################predict EVI spline############################################
 #predicting EVI spline
@@ -108,28 +110,40 @@ predict.centers <- st_make_grid(st_union(bearrange2), cellsize=c(2000,2000), wha
 plot(st_geometry(predict.centers))
 predict.lambda <- as.data.frame(do.call(rbind, st_intersection(predict.centers, bearrange2)))%>%rename("X"="V1", "Y"="V2")
 predict.lambda.sf <- st_as_sf(predict.lambda, coords=c("X", "Y"), crs=3071)
+plot(st_geometry(predict.lambda.sf))
 predict.lambda.sf2 <- st_join(predict.lambda.sf, st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))
 #get Zs for spatial spline
 predict.lambda2 <- predict.lambda %>%
   mutate(X.scale = (X-mean_x)/sd_x,    #need mean_xy and sd_xy from original data frame of camera points
          Y.scale = (Y-mean_y)/sd_y)
+bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 sp.cov.dist_predall = fields::rdist(x1=cbind(predict.lambda2$X.scale,predict.lambda2$Y.scale),x2=bearrangeknots2)
 sp.Z_K.predall = sp.cov.dist_predall^2*log(sp.cov.dist_predall) # basis
 sp.Z.predall <- t(solve(sp.sqrt.omega_all,t(sp.Z_K.predall)))
 sp.Z.predall <- (sp.Z.predall - sp.meanZ)/sp.sdZ  #standardize on same scale as camera data
-spatspline.bs <- MCMCsummary(samples,  
+spatspline.bs <- MCMCsummary(samples[1:3],  
                              params = c('spat.spline.b'),
                              ISB = TRUE,
                              round=2)
 inprodspline <- sp.Z.predall%*%spatspline.bs$mean
-
-#-------------------------fixed effects
+inprodspline2 <- st_buffer(predict.lambda.sf, dist = 1000)
+inprodspline2 <- cbind(inprodspline2, inprodspline)
+plot(inprodspline2["inprodspline"])
+#-------------------------fixed effectinprodspline2#-------------------------fixed effects
 # Forest and Developed land cover
 yearX <- unique(sitecovs$year)
-b_Fixed <- MCMCsummary(samples, 
+b_Fixed <- MCMCsummary(samples[1:3], 
                      params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
                      ISB = TRUE,
                      round=2)
+b_ZoneYr <- MCMCsummary(samples[1:3], 
+                        params = c("b_ZoneYr"),
+                        ISB = TRUE,
+                        round=2)
+b_ZoneYr2 <- data.frame("beta.means"=b_ZoneYr$mean, "Zone"=letters[1:6])
+colnames(predict.lambda.sf2)[] <- "Zone"
+betas.ZoneYr <- left_join(predict.lambda.sf2, b_ZoneYr, by="Zone")
+predict.lambda3 <- cbind(predict.lambda2, betas.ZoneYr)
 MCMCtrace(samples, 
           params = c('abundance_scale'),
           ISB = TRUE,
@@ -180,7 +194,7 @@ developedLCs <- c("DevelopedHighIntensity","DevelopedLowIntensity")
 
 forest.pred <- rowSums(lm_output[,forestLCs])
 forest.pred2 <- (forest.pred - attr(sitecovs$Forest_500, "scaled:center"))/attr(sitecovs$Forest_500, "scaled:scale")
-predict.lambda3 <- cbind(predict.lambda2, forest.pred2)
+predict.lambda3 <- cbind(predict.lambda3, forest.pred2)
 
 dev.pred <- rowSums(lm_output[,developedLCs])
 dev.pred2 <- (dev.pred - attr(sitecovs$Developed_500, "scaled:center"))/attr(sitecovs$Developed_500, "scaled:scale")
@@ -210,7 +224,7 @@ dbf <- list.files(lf_dir, pattern = ".dbf$",
                   recursive = TRUE)
 dbf_tbl  <- foreign::read.dbf(dbf)
 HDistLU <- read.csv("C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/LF2024_HDist24.csv")
-dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
+#dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
 levels(hdist) <- dbf_tbl[,c(1,10)]
 hdist <- addCats(hdist, value=dbf_tbl[,c(4:9)])
 cats(hdist)
@@ -323,23 +337,26 @@ Corn.pred4 <-
 
 Corn.pred5 <- as.data.frame(Corn.pred4%>%mutate(across(matches("Corn"), ~(. - attr(sitecovs$Corn500, "scaled:center"))/attr(sitecovs$Corn500, "scaled:scale"))))
 
-
-
+predict.lambda3 <- cbind(predict.lambda3, Corn.pred5[,2:7])
+predict.lambda3 <- cbind(predict.lambda3, sp.Z.predall)
+saveRDS(predict.lambda3, "./predict.grid.summer.rds")
+predict.lambda3 <- readRDS("./predict.grid.summer.rds")
+sp.Z.predall2 <- as.matrix(predict.lambda3[,14:63])
 lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
-  lambda <- exp(b_Fixed$mean[5]*yearX[i] + b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
-                b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*as.numeric(Corn.pred5[,i+1]) +
-                b_Fixed$mean[4]*predict.lambda3$lm_dist2 + sp.Z.predall%*%spatspline.bs$mean))
+  lambda <- exp(b_Fixed$mean[5]*yearX[i] + b_Fixed*yearX[i] + b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
+                b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*predict.lambda3[,i+7] +
+                b_Fixed$mean[4]*predict.lambda3$lm_dist2))
 names(lambda.predicted.grid) <- 2019:2024
 lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(predict.lambda3, lambda.predicted.grid2)
-colnames(predict.lambda4)[10:15] <- paste0("TotalLambda", 2019:2024)
-
+colnames(predict.lambda4)[64:69] <- paste0("TotalLambda", 2019:2024)
+saveRDS(predict.lambda4, "./predict.lambda4.rds")
 #####################################################################################
 #                             abundance by zone                                     #
 #####################################################################################
 #add zone information to predictions
 predict.lambda5 <- cbind(predict.lambda4, predict.lambda.sf2$bear_mgmt_zone_id)
-colnames(predict.lambda5)[16] <- "Zone"
+colnames(predict.lambda5)[70] <- "Zone"
 popbyzone <- predict.lambda5%>%group_by(Zone)%>%summarise(across(matches("TotalLambda"), ~sum(.x)))%>%drop_na()
 total <- data.frame("Zone"="Total", t(colSums(popbyzone[,2:7])))
 popbyzone <- rbind(popbyzone, total)
@@ -347,6 +364,25 @@ popbyzone2 <- pivot_longer(popbyzone, cols = -c(Zone), names_to = "Year", values
 popbyzone2$Year <- as.numeric(gsub(x = popbyzone2$Year, pattern = "TotalLambda", replacement = ""))
 ggplot(filter(popbyzone2, Zone != "Total"), aes(x=Year, y=lambda, colour = Zone)) + geom_point() + geom_line()
 
+#variation
+#combine MCMC chains into one
+allchains <- MCMCchains(samples[1:3], params =c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr", "spat.spline.b"), ISB = TRUE)
+#loop through estimated parameter at each iteration
+lambda.CIs2019 <- array(dim = c(nrow(predict.lambda), 10000))
+allchainssample <- allchains[sample(nrow(allchains), 10000), ]
+  for(j in 1:10000){
+      lambda.CIs2019[,j] <- exp(allchainssample[j,"b_Yr"]*yearX[1] + allchainssample[j,"b_Dev"]*predict.lambda3$dev.pred2 + 
+                               allchainssample[j,"b_Forest"]*predict.lambda3$forest.pred2 + 
+                               allchainssample[j,"b_Corn"]*as.numeric(Corn.pred5[,2]) +
+                               allchainssample[j,"b_Dist"]*predict.lambda3$lm_dist2 +
+                               sp.Z.predall%*%allchainssample[j, 6:55])
+  }
+#calculate interval
+lambda.CIs2019.2 <- bind_cols(lambda.CIs2019, predict.lambda.sf2$bear_mgmt_zone_id)
+colnames(lambda.CIs2019.2[10001]) <- "Zone"
+zonepop.posterior <- lambda.CIs2019.2%>%group_by(Zone)
+totalpop.posterior <- lambda.CIs2019
+CL2019 <- apply(lambda.CIs2019, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
 #####################################################################################
 #                   spatial prediction across years                                 #
 #####################################################################################
@@ -358,7 +394,15 @@ plot(st_geometry(bearrange2))
 plot(predict.lambda4stars["TotalLambda2024"])
 saveRDS(lambda.predicted.grid, "./predictedlambdasSummer.rds")
 
-
+ggplot() +
+  geom_raster(data = tmax_long_df, aes(x = x, y = y, fill = tmax)) +
+  facet_wrap(Year ~ .) +
+  coord_equal() +
+  scale_fill_viridis_c() +
+  theme_void() +
+  theme(
+    legend.position = "bottom"
+  )
 
 ############################ scrap ######################################
 #spatial spline

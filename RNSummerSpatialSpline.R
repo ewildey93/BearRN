@@ -7,12 +7,9 @@ library(MCMCvis)
 library(sswids)
 library(stringr)
 library(fields)
+library(sswids)
 
-#make look up table for zones for each camsite
-Zones <- readRDS("./ModelingDFSummer.rds")%>%ungroup()%>%select(cam_site_id, season)%>%distinct()%>%st_transform(., 3071)%>%
-  group_by(season)%>%mutate(siteID=row_number())%>%st_join(., st_transform(get_spatial_data("bear_zones"), 3071))%>%arrange(season, cam_site_id)%>%
-  select(cam_site_id, yearID=season, siteID, bear_mgmt_zone_id)%>%mutate(cam_site_id_num = as.numeric(as.factor(cam_site_id)))%>%
-  st_drop_geometry()
+
 
 #make bear range from counties layer
 Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
@@ -87,7 +84,7 @@ sitecovs <- ModelingDF2%>%select(all_of(sitecovcols))%>%distinct()%>%arrange(yea
   group_by(year)%>%mutate(siteID = row_number())%>%ungroup()%>%relocate(siteID)
 #make a siteID x year matrix of camera site IDs
 camsiteskey <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id2 = as.numeric(as.factor(cam_site_id)))
-camsites <- camsiteskey%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
+camsites <- camsiteskey%>%select(-cam_site_id)%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
 #make a siteID x year matrix of number of occasions
 nsurveys <- ModelingDF2%>%group_by(year)%>%mutate(siteID=as.numeric(factor(cam_site_id)))%>%
   ungroup()%>%group_by(cam_site_id,siteID,year,yearID)%>%summarise(nsurveys=n())%>%arrange(yearID, siteID)%>%ungroup()
@@ -102,6 +99,22 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
   select(-siteID)%>%
   as.matrix()%>%
   unname()
+
+
+#make look up table for zones for each camsite
+Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'), 
+                           Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
+  st_as_sf(., coords=c("X", "Y"), crs=3071)%>%
+  st_join(.,st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))%>%
+  rename(zone=bear_mgmt_zone_id)%>%st_drop_geometry()
+
+zone <- Zones%>%select(yearID, siteID, zone)%>%
+  mutate(zone = as.numeric(as.factor(zone)))%>%
+  pivot_wider(names_from = yearID, values_from = zone)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+
 # make a siteID x year matrix of scaled X and Y coordinate
 X <- sitecovs%>%select(year, siteID, X)%>%
   pivot_wider(names_from = year, values_from = X)%>%
@@ -124,6 +137,8 @@ knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrang
 #calculate knots from potential knots
 bearrangeknots <- cover.design(knots.grid2, 50)
 bearrangeknots2 <- as.data.frame(bearrangeknots$design)
+write.csv(bearrangeknots2, "./bearrangeknots.csv")
+bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
 sd_x <- sd(coordsdf$X)
@@ -343,7 +358,8 @@ constants <- list(
   sp.nknots=50,
   EVI.nknots=5
 )
-
+# Zone=zone,
+# nZones=length(unique(Zones$bear_mgmt_unit_id))
 # Bundle data (counts and covariates).
 data <- list(
   y = Bear_All,
@@ -382,7 +398,7 @@ RNcode <- nimbleCode({
   b_Dist ~ dnorm(0, 2)
   # regression coefficient for Forest
   b_Forest ~ dnorm(0, 2)
-  # regression coefficient for Forest
+  # regression coefficient for Corn
   b_Corn ~ dnorm(0, 2)
   
  
@@ -410,9 +426,14 @@ RNcode <- nimbleCode({
     a_version[v] ~ dlogis(0,1)
   }
   
+  # # camera site random effect for detection
+  # for(c in 1:ncams){
+  #   eps_p[c] ~ dnorm(0, sd_p)
+  # }
+  # # hyperprior for abundance random effect
+  # sd_p ~ dgamma(1, 2)
   
   ## Priors for scales  ##
-  
   abundance_scale[1] ~ dcat(catprobs[1:4])
   abundance_scale[2] ~ dcat(catprobs[1:4])
   abundance_scale[3] ~ dcat(catprobs[1:4])
@@ -424,7 +445,7 @@ RNcode <- nimbleCode({
     # Loop through only the sites that are surveyed in a given year. 
     for( i in 1:nsite[t] ){
       N[i, t] ~ dpois( lambda[ i, t ] )
-      log(lambda[i, t]) <-  b_Yr*Year[i, t] +#make this a factor? 
+      log(lambda[i, t]) <-  b_Yr*Year[i, t] +  #make this a factor? b_ZoneYr[Zone[i,t]]*Year[i,t] +
         #scaled parameters
         b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
         #cam_site random effect
@@ -435,7 +456,8 @@ RNcode <- nimbleCode({
       #detection model  
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
-        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #EVI and occ probably correlated + a_occ*occ[i,k,t] + eps_p[camsites[i,t]]
+        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + 
+          a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]]
         y[i, k, t] ~ dbern(muy[i, k, t])
         
         EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
@@ -457,6 +479,7 @@ inits <- function() {
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
              b_Yr = runif(1, -1, 1),
+             #b_ZoneYr = runif(constants$nZones, -1, 1),
              b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
@@ -470,7 +493,8 @@ inits <- function() {
              sigma.EVI=1,
              #a_occ = runif(1, -1, 1),
              #eps_N = rnorm(constants$ncams, 0, 2),
-             #eps_p = rnorm(constants$ncams, 0, 2),
+             # eps_p = rnorm(constants$ncams, 0, 2),
+             # sd_p = runif(1, 0, 2),
              abundance_scale=rcat(4, c(0.25,0.25,0.25,0.25)),
              rho = array(data = runif(length(Bear_All), 0, 1),
                          dim=c(maxsites,no.occs,no.years))
@@ -478,7 +502,7 @@ inits <- function() {
 }
 
 # parameters to monitor
-keepers <- c('b_Dev', "b_Yr", 
+keepers <- c('b_Dev', "b_Yr",
              "b_Dist", "b_Forest", "b_Corn",
              "spat.spline.b", "b",
              "a_version", "a_daysactive", "a_EVI", 
@@ -548,9 +572,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year  + Devsc + Distsc + Forestsc + Cornsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline"))
-saveRDS(samples2, "./RNsamplesFullModelBearRange2.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year  + Zone*Yr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline + ei"))
+saveRDS(samples2, "./RNsamplesFullModelBearRange3.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -563,8 +587,16 @@ MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambd
 
 PR <- rnorm(15000, 0, 2)
 MCMCtrace(samples, 
-          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
+          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr", "b_ZoneYr"),
           ISB = FALSE,
+          exact = TRUE,
+          priors = PR,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCtrace(samples, 
+          params = c( "b_ZoneYr"),
+          ISB = TRUE,
           exact = TRUE,
           priors = PR,
           pdf = FALSE,
@@ -795,3 +827,7 @@ EVI <- seq(2000, 8000, length.out = 100)
 lines(EVI, predict(fm1, data.frame(meanEVI = EVI)), col="red")
 
 inprod(beta[], X[i,])
+
+plot(st_geometry(bearrange2))
+plot(st_geometry(st_as_sf(test2, coords=c("X", "Y"), crs=3071)), col="red", add=TRUE)
+plot(st_geometry(st_as_sf(bearrangeknots2, coords=c("X", "Y"), crs=3071)), col="blue", add=TRUE)

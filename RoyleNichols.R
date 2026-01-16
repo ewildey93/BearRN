@@ -7,11 +7,6 @@ library(MCMCvis)
 library(sswids)
 library(stringr)
 
-#make loo up table for zones for each camsite
-Zones <- readRDS("./ModelingDF.rds")%>%ungroup()%>%select(cam_site_id, season)%>%distinct()%>%
-  group_by(season)%>%mutate(siteID=row_number())%>%st_join(., st_transform(get_spatial_data("bear_zones"), 3071))%>%arrange(season, cam_site_id)%>%
-  select(cam_site_id, yearID=season, siteID, bear_mgmt_zone_id)%>%mutate(cam_site_id_num = as.numeric(as.factor(cam_site_id)))%>%
-  st_drop_geometry()
 
 #make bear range from counties layer
 Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
@@ -23,7 +18,7 @@ counties$bearrange <- ifelse(counties$COUNTY_NAM %in%
                                  "Kenosha", "Milwaukee", "Waukesha", "Jefferson", "Dodge",
                                  "Washington", "Ozaukee", "Sheboygan", "Fond du Lac",
                                  "Green Lake", "Winnebago", "Calumet", "Manitowoc", 
-                                 "Kewaunee", "Door"), 0, 1)
+                                 "Kewaunee", "Door", "Columbia"), 0, 1)
 table(counties$bearrange)
 counties2 <- counties%>%select(COUNTY_NAM, bearrange)
 bearrange <- counties2%>%filter(bearrange == 1)
@@ -97,6 +92,22 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
         select(-siteID)%>%
         as.matrix()%>%
         unname()
+
+#make look up table for zones for each camsite
+Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'), 
+                           Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
+  st_as_sf(., coords=c("X", "Y"), crs=3071)%>%
+  st_join(.,st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))%>%
+  rename(zone=bear_mgmt_zone_id)%>%st_drop_geometry()
+
+zone <- Zones%>%select(yearID, siteID, zone)%>%
+  mutate(zone = as.numeric(as.factor(zone)))%>%
+  pivot_wider(names_from = yearID, values_from = zone)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+
+
 # make a siteID x year matrix of scaled X and Y coordinate
 X <- sitecovs%>%select(year, siteID, X)%>%
   pivot_wider(names_from = year, values_from = X)%>%
@@ -113,13 +124,8 @@ Y <- sitecovs%>%select(year, siteID, Y)%>%
 #spatial spline
 coordsdf <- ModelingDF1%>%select("cam_site_id", "X", "Y")%>%distinct()
 coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
-#make grid of potential knots based on bear range
-cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
-knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
-knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
-#calculate knots from potential knots
-bearrangeknots <- cover.design(knots.grid2, 50)
-bearrangeknots <- as.data.frame(bearrangeknots$design)
+#read in bear knots created in RNSummerSpatialSpline.R
+bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
 sd_x <- sd(coordsdf$X)
@@ -243,6 +249,38 @@ for( t in 1:6 ) {
   }
 }
 
+# knots:
+EVI.num.knots = 5
+EVI.knots<-quantile(unique(EVI2$meanEVI),
+                    seq(0,1,length=(EVI.num.knots+2))[-c(1,(EVI.num.knots+2))])
+
+# construct design matrix Z:
+EVI.Z_K <- (abs(outer(as.numeric(EVI2$meanEVI),EVI.knots,"-")))^3
+
+EVI.OMEGA_all <- (abs(outer(EVI.knots,EVI.knots,"-")))^3
+
+EVI.svd.OMEGA_all <- svd(EVI.OMEGA_all)
+
+EVI.sqrt.OMEGA_all <- t(EVI.svd.OMEGA_all$v %*%
+                          (t(EVI.svd.OMEGA_all$u)*sqrt(EVI.svd.OMEGA_all$d)))
+
+EVI.Z <- t(solve(EVI.sqrt.OMEGA_all,t(EVI.Z_K)))
+meanZ <- mean(EVI.Z)
+sdZ <- sd(EVI.Z)
+EVI.Z <- (EVI.Z-meanZ)/sdZ
+
+EVI3 <- cbind(EVI2, EVI.Z)
+EVIZ_array <- array(NA, dim=c(maxsites,no.occs,no.years, EVI.num.knots)) #sites, occasions, years
+for( t in 1:no.years ) {
+  for( j in 1:no.occs) {
+    for( i in 1:nsite[t]){
+      for(k in 1:EVI.num.knots){
+        EVIZ_array[ i, j, t, k] <- EVI3[ c( EVI3$siteID == i & EVI3$occre == j & EVI3$yearID == t), 8+k]
+      }
+    }
+  }
+}
+
 
 days_active <- detcovs%>%dplyr::select(yearID, siteID, occ, days_active)%>%
   left_join(Dethistlong2, .)
@@ -307,7 +345,9 @@ constants <- list(
   nversions=length(unique(cam_version$cam_versionID2))-1,
   nsurveys=nsurveys2,
   camversion=camversion_array,
-  sp.nknots=50
+  sp.nknots=50,
+  Zone=zone,
+  nZones=length(unique(Zones$bear_mgmt_unit_id))
 )
 
 # Bundle data (counts and covariates).
@@ -320,8 +360,9 @@ data <- list(
   Corn=Corn_array,
   EVI=EVI_array,
   daysactive=daysactive_array,
-  catprobs = c(1/3,1/3,1/3),
-  sp.Z=sp.Zarray
+  catprobs = c(0.25,0.25,0.25,0.25),
+  sp.Z=sp.Zarray,
+  EVI.Z= EVIZ_array
 )
 
 RNcode <- nimbleCode({
@@ -345,14 +386,21 @@ RNcode <- nimbleCode({
   b_Dist ~ dnorm(0, 2)
   # regression coefficient for Forest
   b_Forest ~ dnorm(0, 2)
+  # regression coefficient for Forest
+  b_Corn ~ dnorm(0, 2)
   
   for (k in 1:sp.nknots) {
     spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
   }
   
+  for (k in 1:EVI.nknots) {
+    b[k] ~ dnorm(0,sigma.EVI)
+  }
   
   # spline random effect priors
   sigma.spat.spline.b~dunif(0,10)
+  # spline random effect priors
+  sigma.EVI~dunif(0,100)
   
   ## Priors for detection parameters ##
   # coefficient for occasion
@@ -362,33 +410,41 @@ RNcode <- nimbleCode({
     a_version[v] ~ dlogis(0,1)
   }
   
-  
+  # # camera site random effect for detection
+  # for(c in 1:ncams){
+  #   eps_p[c] ~ dnorm(0, sd_p)
+  # }
+  # # hyperprior for abundance random effect
+  # sd_p ~ dgamma(1, 2)
   
   ## Priors for scales  ##
 
-abundance_scale[1] ~ dcat(catprobs[1:3])
-abundance_scale[2] ~ dcat(catprobs[1:3])
-abundance_scale[3] ~ dcat(catprobs[1:3])
-abundance_scale[4] ~ dcat(catprobs[1:3])
+abundance_scale[1] ~ dcat(catprobs[1:4])
+abundance_scale[2] ~ dcat(catprobs[1:4])
+abundance_scale[3] ~ dcat(catprobs[1:4])
+abundance_scale[4] ~ dcat(catprobs[1:4])
 
 for( t in 1:nyear ) { #loop over site then year?
   #state model
   # Loop through only the sites that are surveyed in a given year. 
   for( i in 1:nsite[t] ){
     N[i, t] ~ dpois( lambda[ i, t ] )
-    log(lambda[i, t]) <-  b_Yr*Year[i, t] +#make this a factor? 
+    log(lambda[i, t]) <-  b_Yr*Year[i, t] +  +#make this a factor? #b_ZoneYr[Zone[i,t]]*Year[i,t]
       #scaled parameters
       b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
       #cam_site random effect
-      s[camsites[i,t]] #s[i,t] - spatial random effect
+      s[i,t] #s[i,t] - spatial random effect
     
-    s[camsites[i,t]] <- inprod(spat.spline.b[1:sp.nknots],Z[camsites[i,t],1:sp.nknots])
+    s[i,t] <- inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
   
       #detection model  
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
-        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + a_EVI*EVI[i,k,t] #EVI and occ probably correlated
+        logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + 
+          a_EVI*EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]]#EVI and occ probably correlated
         y[i, k, t] ~ dbern(muy[i, k, t])
+        
+        EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
       }
     }
   }
@@ -403,6 +459,7 @@ inits <- function() {
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
              b_Yr = runif(1, -1, 1),
+             #b_ZoneYr = runif(constants$nZones, -1, 1),
              b_Corn = runif(1, -1, 1),
              b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
@@ -412,14 +469,19 @@ inits <- function() {
              a_EVI = runif(1, -1, 1),
              spat.spline.b=rep(1,constants$sp.nknots),
              sigma.spat.spline.b=1,
-             abundance_scale=rcat(4, c(1/3,1/3,1/3)),
+             b=rep(1,constants$EVI.nknots),
+             sigma.EVI=1,
+             abundance_scale=rcat(4, c(0.25,0.25,0.25, 0.25)),
+             # eps_p = rnorm(constants$ncams, 0, 2),
+             # sd_p = runif(1, 0, 2),
              rho = array(data = runif(length(Bear_All), 0, 1),
                          dim=c(1243,11,6)))
 }
 
 # parameters to monitor
-keepers <- c( 'b_Dev', "b_Yr", "b_Dist", "b_Forest", "b_Corn",
-             "spat.spline.b",
+keepers <- c( 'b_Dev', "b_Yr",
+              "b_Dist", "b_Forest", "b_Corn",
+             "spat.spline.b", "b",
              "a_version", "a_daysactive", "a_EVI", 
              "abundance_scale")
 

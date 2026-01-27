@@ -493,6 +493,7 @@ email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
 path <- tempfile(fileext = ".zip")#"C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
+lf_dir <- "C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/"
 hdist2023 <-landfireAPIv2(products = products,
                           aoi = aoi, 
                           email = email,
@@ -509,7 +510,7 @@ dbf <- list.files(lf_dir, pattern = ".dbf$",
                   full.names = TRUE,
                   recursive = TRUE)
 dbf_tbl  <- foreign::read.dbf(dbf)
-HDistLU <- read.csv("C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/LF2024_HDist24.csv")
+#HDistLU <- read.csv("C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/LF2024_HDist24.csv")
 dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
 levels(hdist) <- dbf_tbl[,c(1,10)]
 hdist <- addCats(hdist, value=dbf_tbl[,c(4:9)])
@@ -521,6 +522,8 @@ activeCat(hdist) <- 1
 
 
 hdist2 <- ifel(hdist > 1, 1, hdist)
+plot(hdist)
+plot(hdist2)
 # Wiscland2 has 30m resolution
 
 # Wiscland 3 prop land cover

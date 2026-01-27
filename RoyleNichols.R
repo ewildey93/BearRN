@@ -27,7 +27,7 @@ bearrange <- st_cast(bearrange, "POLYGON")
 bearrange2 <- st_intersection(bearrange, Wisconsin2)
 
 ModelingDF <- readRDS("./ModelingDFSpring.rds")%>%ungroup() #this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
-ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(37:44))
+ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(40:47))
 ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
   st_drop_geometry()%>%ungroup()
 ModelingDF1 <- ModelingDF1[-which(ModelingDF1$camera_version %in% c("V2,V4","V2,V3")),] #remove occasions which have multiple camera versions
@@ -67,7 +67,7 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:35), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:38), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
 scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
@@ -132,7 +132,7 @@ sd_x <- sd(coordsdf$X)
 mean_y <- mean(coordsdf$Y)
 sd_y <- sd(coordsdf$Y)
 
-spknots <- bearrangeknots %>%
+spknots <- bearrangeknots2 %>%
   mutate(X.scale = (X-mean_x)/sd_x,
          Y.scale = (Y-mean_y)/sd_y) %>%
   dplyr::select(X.scale,Y.scale)
@@ -159,7 +159,7 @@ sp.Z <- (sp.Z - sp.meanZ)/sp.sdZ #for prediction?
 sp.Z2 <- cbind.data.frame(coordsdf$cam_site_id, sp.Z)
 colnames(sp.Z2)[1] <- "cam_site_id"
 sp.Z3 <- left_join(camsiteskey, sp.Z2)
-sp.Zarray <- array(NA, dim=c(maxsites,no.years,nrow(bearrangeknots)))
+sp.Zarray <- array(NA, dim=c(maxsites,no.years,nrow(bearrangeknots2)))
 for( t in 1:no.years ) {
   for( k in 1:nrow(spknots)) {
     for( i in 1:nsite[t]){
@@ -184,7 +184,7 @@ for( t in 1:no.years ) {
 }
 
 #reduce scales to 500m, 1000m, 5000m
-Developed_array <- Developed_array[,,c(3,4,5)]
+Developed_array <- Developed_array[,,c(2:5)]
 
 #Disturbance
 Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
@@ -199,7 +199,7 @@ Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
     }
   }
 
-  Dist_array <- Dist_array[,,c(3,4,5)]
+  Dist_array <- Dist_array[,,c(2:5)]
   
 #Proportion of Forest
 Forest <- sitecovs%>%select(yearID, siteID, matches("Forest"))%>%
@@ -214,17 +214,18 @@ for( t in 1:6 ) {
   }
 }
 
-Forest_array <- Forest_array[,,c(3,4,5)]
+Forest_array <- Forest_array[,,c(2:5)]
 
-#Corn, only 3 scdales for this it was taking forever to run
+#Corn, 
 Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
   pivot_longer(cols = matches("Corn"), names_pattern="(\\d+$)", names_to = "scale")
+scales25 <- scales[2:5]
 
-Corn_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+Corn_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
 for( t in 1:no.years ) {
-  for( s in 1:3) {
+  for( s in 1:4) {
     for( i in 1:nsite[t]){
-      Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales[s] & Corn$yearID == t), "value"]$value
+      Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales25[s] & Corn$yearID == t), "value"]$value
     }
   }
 }
@@ -240,7 +241,7 @@ EVI <- readRDS("./EVIsiteyearocc.rds")%>%arrange(year, cam_site_id)%>%mutate(mea
 EVI2 <- left_join(Dethistlong2, EVI)
 
 
-EVI_array <- array(NA, dim=c(1243,11,6)) #sites, occasions, years
+EVI_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
 for( t in 1:6 ) {
   for( j in 1:11) {
     for( i in 1:nsite[t]){
@@ -285,7 +286,7 @@ for( t in 1:no.years ) {
 days_active <- detcovs%>%dplyr::select(yearID, siteID, occ, days_active)%>%
   left_join(Dethistlong2, .)
 
-  daysactive_array <- array(NA, dim=c(1243,11,6)) #sites, occasions, years
+  daysactive_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
   for( t in 1:6 ) {
     for( j in 1:11) {
       for( i in 1:nsite[t]){
@@ -304,7 +305,7 @@ cam_version <- detcovs%>%select(yearID, siteID, occ, camera_version)%>%
   
   
 
-camversion_array <- array(NA, dim=c(1243,11,6)) #sites, occasions, years. Do i need to remo
+camversion_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years. Do i need to remo
 for( t in 1:6 ) {
   for( j in 1:11) {
     for( i in 1:nsite[t]){
@@ -346,9 +347,10 @@ constants <- list(
   nsurveys=nsurveys2,
   camversion=camversion_array,
   sp.nknots=50,
-  Zone=zone,
-  nZones=length(unique(Zones$bear_mgmt_unit_id))
-)
+  EVI.nknots=EVI.num.knots
+) 
+# Zone=zone,
+# nZones=length(unique(Zones$bear_mgmt_unit_id))
 
 # Bundle data (counts and covariates).
 data <- list(
@@ -398,7 +400,7 @@ RNcode <- nimbleCode({
   }
   
   # spline random effect priors
-  sigma.spat.spline.b~dunif(0,10)
+  sigma.spat.spline.b~dunif(0,100)
   # spline random effect priors
   sigma.EVI~dunif(0,100)
   
@@ -541,7 +543,7 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-saveRDS(samples, "./RNsamples50000.rds")
+saveRDS(samples, "./RNsamplesFullModelBearRangeSpring.rds")
 
 samples <- readRDS("./RNsamples.rds")
 
@@ -553,7 +555,7 @@ MCMCsummary(samples,params = "a_version", round = 2) #detection really low backt
 
 PR <- rnorm(15000, 0, 2)
 MCMCtrace(samples, 
-          params = c('b_Lat', 'b_HFI', 'b_Forest', "b_Yr", "b_Dist"),
+          params = c('b_Corn', 'b_Dev', 'b_Forest', "b_Yr", "b_Dist"),
           ISB = FALSE,
           exact = TRUE,
           priors = PR,
@@ -568,7 +570,7 @@ MCMCtrace(samples,
           Rhat = TRUE,
           n.eff = TRUE)
 MCMCtrace(samples, 
-          params = c("a_version", "a_daysactive", "a_EVI", "a_occ"),
+          params = c("a_version", "a_daysactive", "a_EVI"),
           ISB = TRUE,
           exact = TRUE,
           pdf = FALSE,
@@ -581,6 +583,17 @@ MCMCtrace(samples,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
+MCMCtrace(samples, 
+          params = c('spat.spline.b[1]', 'spat.spline.b[2]', 'spat.spline.b[3]', 'spat.spline.b[4]', 'spat.spline.b[5]'),
+          ISB = FALSE,
+          exact = TRUE,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCsummary(samples, 
+            params = c("spat.spline.b"), #still has nodes for "lambda[1243, 1]" and such
+            ISB = TRUE,
+            round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
 
 runCrossValidate

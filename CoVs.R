@@ -485,7 +485,8 @@ products <- "HDIST2023"
 email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
-path <- tempfile(fileext = ".zip")#"C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
+path <- tempfile(fileext = ".zip")
+lf_dir <- "C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
 hdist2023 <-landfireAPIv2(products = products,
                           aoi = aoi, 
                           email = email,
@@ -514,6 +515,7 @@ activeCat(hdist) <- 1
 
 
 hdist2 <- ifel(hdist > 1, 1, hdist)
+plot(hdist2)
 # Wiscland2 has 30m resolution
 
 # Wiscland 3 prop land cover
@@ -589,7 +591,7 @@ buffers2=buffers %>%
 lm_output <- 
   mapply(x= CropRasts2, y=camsiteyearsCDL,
          # produce a dataframe after this is all done
-         \(x,y) lapply(buffers2[3:5], 
+         \(x,y) lapply(buffers2[2], 
                        \(z) sample_lsm(
                          # raster layer
                          landscape = x,
@@ -645,6 +647,10 @@ CornNA <- ModelingDFNew2[is.na(ModelingDFNew2$Corn1000),]
 CornNA2 <- lm_output2[paste0(lm_output2$plot_id, lm_output2$year) %in% paste0(CornNA$cam_site_id, CornNA$year),]
 ModelingDFNew2 <- ModelingDFNew2%>%mutate(across(matches("Corn"), ~replace_na(.x, 0)))
 saveRDS(ModelingDFNew2, "./ModelingDFSpring.rds")
+ModelingDFNew3 <- readRDS("./ModelingDFSpring.rds")
+ModelingDFNew3 <- left_join(ModelingDFNew3, Corn3)%>%relocate(Corn500, .before = Corn1000)%>%
+  mutate(across(matches("Corn500"), ~replace_na(.x, 0)))
+saveRDS(ModelingDFNew3, "./ModelingDFSpring.rds")
 
 BEARCPUE5 <- left_join(BEARCPUE4, Corn3)
 BEARCPUE5 <- BEARCPUE5%>%mutate(across(matches("Corn"), ~replace_na(.x, 0)))

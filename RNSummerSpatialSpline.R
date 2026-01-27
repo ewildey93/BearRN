@@ -35,7 +35,7 @@ bearrange2 <- st_intersection(bearrange, Wisconsin2)
 ModelingDF <- readRDS("./ModelingDFSummer.rds")%>%st_transform(., 3071)
 ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(37:44))
 ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
-  st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18)%>%filter(BEAR_ADULT_AMT < 200) 
+  st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18)%>%filter(BEAR_ADULT_AMT < 200) #5/21-8/26
 #remove occasions which have multiple camera versions
 ModelingDF1 <- ModelingDF1[-which(ModelingDF1$camera_version %in% c("V2,V4","V2,V3")),] 
 only1occ <- ModelingDF1%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
@@ -572,9 +572,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year  + Zone*Yr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline + ei"))
-saveRDS(samples2, "./RNsamplesFullModelBearRange3.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year  + Devsc + Distsc + Forestsc + Cornsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline"))
+saveRDS(samples2, "./RNsamplesFullModelBearRange4.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -586,8 +586,8 @@ MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambd
 
 
 PR <- rnorm(15000, 0, 2)
-MCMCtrace(samples, 
-          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr", "b_ZoneYr"),
+MCMCtrace(samplesSummer[1:3], 
+          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
           ISB = FALSE,
           exact = TRUE,
           priors = PR,
@@ -831,3 +831,37 @@ inprod(beta[], X[i,])
 plot(st_geometry(bearrange2))
 plot(st_geometry(st_as_sf(test2, coords=c("X", "Y"), crs=3071)), col="red", add=TRUE)
 plot(st_geometry(st_as_sf(bearrangeknots2, coords=c("X", "Y"), crs=3071)), col="blue", add=TRUE)
+
+
+# make a pretty table with example of the input data to the model
+Dethist2019 <- Dethistlong%>%mutate(occ=occ-3)%>%filter(year == 2019)%>%pivot_wider(names_from = occ, values_from = det)
+Dethistdemo <- Dethist2019[c(45,49,50,51),1:11]
+Dethistdemo2 <- Dethistdemo[, -c(3,4)]
+colnames(Dethistdemo2) <- c("Camera Site", "Year", paste0("Week", 1:7))
+library(gt)
+Dethistdemo2%>%gt()%>%   tab_style(
+  style = list(
+    cell_text(weight = "bold", color = "white"),
+    cell_fill(color = "#0072B2")
+  ),
+  locations = cells_column_labels(everything())
+)%>%
+  tab_style(
+    style = list(
+      cell_fill(color = "grey") # A light yellow color
+    ),
+    locations = cells_body(
+      columns = c(cam_site_id, year)
+    )
+  )%>%
+  cols_label(
+    cam_site_id = "Camera Site",
+    year = "Year",
+    `1`= "Week1",
+    `2`= "Week2",
+    `3`= "Week3",
+    `4`= "Week4",
+    `5`= "Week5",
+    `6`= "Week6",
+    `7`= "Week7"
+  )

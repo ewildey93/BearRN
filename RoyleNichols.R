@@ -67,11 +67,11 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:38), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:18, 25:40), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
 scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
-sitecovcols <- c("cam_site_id", "yearID", "year", "Lat", scalevars)
+sitecovcols <- c("cam_site_id", "yearID", "year", "X", "Y", scalevars)
 #make dataframe of site covariates and add site ID
 sitecovs <- ModelingDF2%>%select(all_of(sitecovcols))%>%distinct()%>%arrange(year, cam_site_id)%>%
   group_by(year)%>%mutate(siteID = row_number())%>%ungroup()%>%relocate(siteID)
@@ -93,6 +93,18 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
         as.matrix()%>%
         unname()
 
+# make a siteID x year matrix of scaled X and Y coordinate
+X <- sitecovs%>%select(year, siteID, X)%>%
+  pivot_wider(names_from = year, values_from = X)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+Y <- sitecovs%>%select(year, siteID, Y)%>%
+  pivot_wider(names_from = year, values_from = Y)%>%
+  select(-siteID)%>%
+  as.matrix()%>%
+  unname()
+
 #make look up table for zones for each camsite
 Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'), 
                            Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
@@ -107,18 +119,6 @@ zone <- Zones%>%select(yearID, siteID, zone)%>%
   as.matrix()%>%
   unname()
 
-
-# make a siteID x year matrix of scaled X and Y coordinate
-X <- sitecovs%>%select(year, siteID, X)%>%
-  pivot_wider(names_from = year, values_from = X)%>%
-  select(-siteID)%>%
-  as.matrix()%>%
-  unname()
-Y <- sitecovs%>%select(year, siteID, Y)%>%
-  pivot_wider(names_from = year, values_from = Y)%>%
-  select(-siteID)%>%
-  as.matrix()%>%
-  unname()
 
 
 #spatial spline
@@ -347,7 +347,9 @@ constants <- list(
   nsurveys=nsurveys2,
   camversion=camversion_array,
   sp.nknots=50,
-  EVI.nknots=EVI.num.knots
+  EVI.nknots=EVI.num.knots,
+  Zone=zone,
+  nZones=6
 ) 
 # Zone=zone,
 # nZones=length(unique(Zones$bear_mgmt_unit_id))
@@ -380,8 +382,14 @@ RNcode <- nimbleCode({
   # precision of CAR prior
   # tau ~ dgamma(1, 1)
   
-  # regression coefficient for ruffed grouse priority zone
-  b_Yr ~ dnorm(0, 2)
+  # regression coefficient for bear zone
+  for (z in 1:nZones){
+    b_Zone[z] ~ dnorm(0, 2)
+  }
+  # regression coefficient for zone-year effect
+  for (z in 1:nZones){
+    b_ZoneYr[z] ~ dnorm(0, 2)
+  }
   # regression coefficient for Human Footprint Index
   b_Dev ~ dnorm(0, 2)
   # regression coefficient for Dist
@@ -431,7 +439,7 @@ for( t in 1:nyear ) { #loop over site then year?
   # Loop through only the sites that are surveyed in a given year. 
   for( i in 1:nsite[t] ){
     N[i, t] ~ dpois( lambda[ i, t ] )
-    log(lambda[i, t]) <-  b_Yr*Year[i, t] +  +#make this a factor? #b_ZoneYr[Zone[i,t]]*Year[i,t]
+    log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +   +#make this a factor?
       #scaled parameters
       b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
       #cam_site random effect
@@ -460,8 +468,8 @@ inits <- function() {
   base::list(N = matrix(data = rep(1, max(constants$nsite)*constants$nyear),
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
-             b_Yr = runif(1, -1, 1),
-             #b_ZoneYr = runif(constants$nZones, -1, 1),
+             b_Zone = runif(constants$nZones, -1, 1),
+             b_ZoneYr = runif(constants$nZones, -1, 1),
              b_Corn = runif(1, -1, 1),
              b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
@@ -481,7 +489,7 @@ inits <- function() {
 }
 
 # parameters to monitor
-keepers <- c( 'b_Dev', "b_Yr",
+keepers <- c( 'b_Dev', "b_Zone", "b_ZoneYr",
               "b_Dist", "b_Forest", "b_Corn",
              "spat.spline.b", "b",
              "a_version", "a_daysactive", "a_EVI", 
@@ -492,8 +500,8 @@ keepers <- c( 'b_Dev', "b_Yr",
 # to speed things up, particularly for longer chains, you can run chains in parallel
 # see: https://groups.google.com/g/nimble-users/c/RHH9Ybh7bSI
 nc <- 3 # number of chains
-nb <- 5000 # number of initial MCMC iterations to discard
-ni <- 75000 # total number  of iterations
+nb <- 10000 # number of initial MCMC iterations to discard
+ni <- 100000 # total number  of iterations
 
 # .......................................................................
 # RUN MODEL
@@ -541,16 +549,19 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nburnin = nb, 
                            niter = ni, 
                            nchains = nc, 
-                           thin= 5,
+                           thin= 10,
                            inits=inits())
-saveRDS(samples, "./RNsamplesFullModelBearRangeSpring.rds")
+
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline"))
+saveRDS(samples, "./RNsamplesFullModelBearRangeSpring2.rds")
 
 samples <- readRDS("./RNsamples.rds")
 
 MCMCsummary(samples,params = "b_Lat", round = 2)
 MCMCsummary(samples,params = "b_HFI", round = 2)
 MCMCsummary(samples,params = "abundance_scale", round = 2)
-MCMCsummary(samples,params = "a_version", round = 2) #detection really low backtransformed to response scale, naive detection 0.07
+MCMCsummary(samples,params = "a_version", round = 2) 
 
 
 PR <- rnorm(15000, 0, 2)

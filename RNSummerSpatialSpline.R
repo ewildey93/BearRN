@@ -11,6 +11,7 @@ library(sswids)
 
 
 
+
 #make bear range from counties layer
 Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
 Wisconsin2 <- Wisconsin%>%filter(INSIDE_WI_ == 1)
@@ -106,10 +107,13 @@ Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'
                            Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
   st_as_sf(., coords=c("X", "Y"), crs=3071)%>%
   st_join(.,st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))%>%
-  rename(zone=bear_mgmt_zone_id)%>%st_drop_geometry()
+  rename(zone=bear_mgmt_zone_id)#%>%st_drop_geometry()
+ZoneQ <- Zones%>%group_by(zone, yearID)%>%summarise(n=n())
+table(is.na(Zones$zone))
 
 zone <- Zones%>%select(yearID, siteID, zone)%>%
-  mutate(zone = as.numeric(as.factor(zone)))%>%
+  mutate(zone=ifelse(zone %in% c("E", "F"), "E,F", zone))%>%
+  mutate(zone = as.numeric(as.factor(zone)))#%>%
   pivot_wider(names_from = yearID, values_from = zone)%>%
   select(-siteID)%>%
   as.matrix()%>%
@@ -131,13 +135,13 @@ Y <- sitecovs%>%select(year, siteID, Y)%>%
 coordsdf <- ModelingDF1%>%select("cam_site_id", "X", "Y")%>%distinct()
 coordsmatrix <- coordsdf%>%st_drop_geometry()%>%select("X", "Y")%>%as.matrix()
 #make grid of potential knots based on bear range
-cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
-knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
-knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
+# cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
+# knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
+# knots.grid2 <- as.data.frame(do.call(rbind, st_intersection(knots.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
 #calculate knots from potential knots
-bearrangeknots <- cover.design(knots.grid2, 50)
-bearrangeknots2 <- as.data.frame(bearrangeknots$design)
-write.csv(bearrangeknots2, "./bearrangeknots.csv")
+# bearrangeknots <- cover.design(knots.grid2, 50)
+# bearrangeknots2 <- as.data.frame(bearrangeknots$design)
+#write.csv(bearrangeknots2, "./bearrangeknots.csv")
 bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
@@ -356,7 +360,9 @@ constants <- list(
   nsurveys=nsurveys2,
   camversion=camversion_array,
   sp.nknots=50,
-  EVI.nknots=5
+  EVI.nknots=5,
+  Zone=zone,
+  nZones=5
 )
 # Zone=zone,
 # nZones=length(unique(Zones$bear_mgmt_unit_id))
@@ -390,9 +396,16 @@ RNcode <- nimbleCode({
   # precision of CAR prior
   # tau ~ dgamma(1, 1)
   
-  # regression coefficient for ruffed grouse priority zone
-  b_Yr ~ dnorm(0, 2)
-  # regression coefficient for Human Footprint Index
+  
+  # regression coefficient for bear zone
+  for (z in 1:nZones){
+    b_Zone[z] ~ dnorm(0, 2)
+  }
+  # regression coefficient for zone-year effect
+  for (z in 1:nZones){
+  b_ZoneYr[z] ~ dnorm(0, 2)
+  }
+  # regression coefficient for Developed
   b_Dev ~ dnorm(0, 2)
   # regression coefficient for Dist
   b_Dist ~ dnorm(0, 2)
@@ -445,7 +458,7 @@ RNcode <- nimbleCode({
     # Loop through only the sites that are surveyed in a given year. 
     for( i in 1:nsite[t] ){
       N[i, t] ~ dpois( lambda[ i, t ] )
-      log(lambda[i, t]) <-  b_Yr*Year[i, t] +  #make this a factor? b_ZoneYr[Zone[i,t]]*Year[i,t] +
+      log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +  #make this a factor? 
         #scaled parameters
         b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
         #cam_site random effect
@@ -478,8 +491,9 @@ inits <- function() {
   base::list(N = matrix(data = rep(1, max(constants$nsite)*constants$nyear),
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
-             b_Yr = runif(1, -1, 1),
-             #b_ZoneYr = runif(constants$nZones, -1, 1),
+             #b_Yr = runif(1, -1, 1),
+             b_Zone = runif(constants$nZones, -1, 1),
+             b_ZoneYr = runif(constants$nZones, -1, 1),
              b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
@@ -502,7 +516,7 @@ inits <- function() {
 }
 
 # parameters to monitor
-keepers <- c('b_Dev', "b_Yr",
+keepers <- c('b_Dev',  "b_Zone", "b_ZoneYr",
              "b_Dist", "b_Forest", "b_Corn",
              "spat.spline.b", "b",
              "a_version", "a_daysactive", "a_EVI", 
@@ -513,8 +527,8 @@ keepers <- c('b_Dev', "b_Yr",
 # to speed things up, particularly for longer chains, you can run chains in parallel
 # see: https://groups.google.com/g/nimble-users/c/RHH9Ybh7bSI
 nc <- 3 # number of chains
-nb <- 5000 # number of initial MCMC iterations to discard
-ni <- 75000 # total number  of iterations
+nb <- 10000 # number of initial MCMC iterations to discard
+ni <- 65000 # total number  of iterations
 
 # .......................................................................
 # RUN MODEL
@@ -544,6 +558,7 @@ model_conf <- nimble::configureMCMC(model)# enableWAIC = TRUE
 
 model_conf$addMonitors(keepers)
 
+
 #reversible jump MCMC
 # configureRJ(RN_code,
 #             targetNodes = c("HFI", "Dist", "Forest"),
@@ -572,9 +587,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <-  Year  + Devsc + Distsc + Forestsc + Cornsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline"))
-saveRDS(samples2, "./RNsamplesFullModelBearRange4.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline, EF combined"))
+saveRDS(samples2, "./RNsamplesFullModelBearRangeEFcomb.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -586,9 +601,9 @@ MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambd
 
 
 PR <- rnorm(15000, 0, 2)
-MCMCtrace(samplesSummer[1:3], 
-          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
-          ISB = FALSE,
+MCMCtrace(samples, 
+          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Zone", "b_ZoneYr"),
+          ISB = TRUE,
           exact = TRUE,
           priors = PR,
           pdf = FALSE,
@@ -596,7 +611,7 @@ MCMCtrace(samplesSummer[1:3],
           n.eff = TRUE)
 MCMCtrace(samples, 
           params = c( "b_ZoneYr"),
-          ISB = TRUE,
+          ISB = FALSE,
           exact = TRUE,
           priors = PR,
           pdf = FALSE,
@@ -631,7 +646,7 @@ MCMCtrace(test,
           Rhat = TRUE,
           n.eff = TRUE)
 MCMCsummary(samples, 
-          params = c("spat.spline.b"), #still has nodes for "lambda[1243, 1]" and such
+          params = c("b_Zone", "b_ZoneYr"), #still has nodes for "lambda[1243, 1]" and such
           ISB = TRUE,
           round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]

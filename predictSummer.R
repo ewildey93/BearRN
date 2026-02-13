@@ -15,7 +15,7 @@ library(data.table)
 library(viridis)
 
 
-samplesSummer <- readRDS("./RNsamplesFullModelBearRange4.rds")
+samplesSummer <- readRDS("./RNsamplesFullModelBearRange5.rds")
 bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
@@ -98,51 +98,36 @@ ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="#0072B2") +
     x="Greenness of Vegetation"
   )
 
-######################################  predict spatial spline #####################################################
-#make prediction grid for spatial spline
-cellsize <- rep(sqrt(5.18e7), 2)#20mi^2
-predict.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
-cellsize <- rep(sqrt(2.59e7), 2)#10mi^2
-knots.grid <- st_make_grid(st_union(bearrange2), cellsize, what="centers")
-knots.grid2 <- st_coordinates(knots.grid)
-bearrangeknots <- cover.design(knots.grid2, 50)
-predict.grid.polys <- st_make_grid(st_union(bearrange2), cellsize, what="polygons")
-predict.grid2 <- as.data.frame(do.call(rbind, st_intersection(predict.grid, bearrange2)))%>%rename("X"="V1", "Y"="V2")
-predict.grid2.polys <- st_intersection(predict.grid.polys, bearrange2)
-predict.grid2.polys <- as.data.frame(do.call(rbind, st_intersection(predict.grid.polys, bearrange2)))
-predict.grid3 <- predict.grid2 %>%
-  mutate(X.scale = (X-mean_x)/sd_x,
-         Y.scale = (Y-mean_y)/sd_y)
-sp.cov.dist_pred = fields::rdist(x1=cbind(predict.grid3$X.scale,predict.grid3$Y.scale),x2=spknots)
-sp.Z_K.pred = sp.cov.dist_pred^2*log(sp.cov.dist_pred) # basis
-sp.Z.pred <- t(solve(sp.sqrt.omega_all,t(sp.Z_K.pred)))
-sp.Z.pred <- (sp.Z.pred - sp.meanZ)/sp.sdZ #for prediction?
-bXY <- MCMCsummary(samples[[1]], 
-                   params = c('b_X', 'b_Y'),
-                   ISB = FALSE,
-                   round=2)
-spatspline.bs <- MCMCsummary(samplesSummer[1:3], 
-                             params = c('spat.spline.b'),
-                             ISB = TRUE,
-                             round=2)
-lambda.pred.spline <- bXY$mean[1]*predict.grid3$X.scale + bXY$mean[2]*predict.grid3$Y.scale
+#--------------------------------------------------------------------
+#                      detection betas
+#--------------------------------------------------------------------
+a_Fixed <- MCMCsummary(samples, 
+                        params = c("a_version", "a_daysactive", "a_EVI"),
+                        ISB = TRUE,
+                        round=2)
+a_Fixed <- data.frame("Var"=c("Version 3", "Version 4", "Effort", "NDVI"),a_Fixed)
+a_Fixed$Var <- factor(a_Fixed$Var, levels=c("Version 3", "Version 4", "Effort", "NDVI"))
+a_Fixed <- a_Fixed%>%arrange(Var)
 
-lambda.pred.spline2 <- exp(lambda.pred.spline + inprodsplineman)
-inprodspline <- sp.Z.pred%*%spatspline.bs$mean
-predict.grid3$lambda.pred <- lambda.pred.spline2
-predict.grid4 <- st_buffer(st_as_sf(predict.grid3, coords=c("X", "Y"), crs=3071), dist = cellsize/2)
-plot(predict.grid4["lambda.pred"])
-plot(st_geometry(bearrange2), add=TRUE)
+ggplot(a_Fixed, aes(x=Var, y=mean)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
+  coord_flip() + geom_hline(yintercept = 0) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position="none",
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(
+          face = ifelse(a_Fixed$Var %in% c("Version 3", "Version 4", "Effort"), "bold", "plain"),
+          hjust = 0.5
+        )
+  ) +
+  labs(
+    y=expression("Posterior " * beta *""),
+  ) #+
+  #scale_color_manual(values=rev(cbPalette)) +
+  #scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
 
-numpal <- colorNumeric(
-  palette = "viridis",                          # Use a ColorBrewer palette name
-  domain = predict.grid4$lambda.pred                     # The numeric range of values
-)
-leaflet() %>% 
-  # addProviderTiles("OpenStreetMap.Mapnik") %>%
-  addTiles() %>%
-  addPolygons(data=st_transform(bearrange2, 4326), color="black", fillColor=NA)%>%
-  addPolygons(data=st_transform(predict.grid4, crs=4326), fillColor=~numpal(lambda.pred), fillOpacity = 1)
 
 
 #---------------------------------------------------------------------
@@ -193,21 +178,32 @@ ggplot() + geom_sf(data=inprodspline2Summer, aes(fill=inprodsplineSummer), color
   labs(fill=expression("Mean site\nabundance"),
        title="Effect of Spatial Spline on Abundance"
        )
+colorpal <- colorNumeric(palette = "magma", 
+                        domain=inprodspline2Summer$inprodsplineSummer)
+bearzones <- st_make_valid(get_spatial_data("bear_zones"))
+leaflet() %>% 
+  # addProviderTiles("OpenStreetMap.Mapnik") %>%
+  addTiles() %>%
+  addPolygons(data=st_transform(inprodspline2Summer, crs=4326), color = ~colorpal(inprodspline2Summer$inprodsplineSummer), group="lambda")%>%
+  addPolygons(data=st_transform(bearzones, 4326), fill=NA, color="black", group="zones")%>%
+  addLayersControl(overlayGroups = c("lambda", "zones"))
 #-------------------------fixed effectinprodspline2#-------------------------fixed effects
 # Forest and Developed land cover
 yearX <- unique(sitecovs$year)
 b_Fixed <- MCMCsummary(samplesSummer[1:3], 
-                     params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr"),
+                     params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist"),
                      ISB = TRUE,
                      round=2)
-b_ZoneYr <- MCMCsummary(samples[1:3], 
-                        params = c("b_ZoneYr"),
+b_ZoneEff <- MCMCsummary(samplesSummer[1:3], 
+                        params = c("b_ZoneYr", "b_Zone"),
                         ISB = TRUE,
                         round=2)
-b_ZoneYr2 <- data.frame("beta.means"=b_ZoneYr$mean, "Zone"=letters[1:6])
-colnames(predict.lambda.sf2)[] <- "Zone"
-betas.ZoneYr <- left_join(predict.lambda.sf2, b_ZoneYr, by="Zone")
-predict.lambda3 <- cbind(predict.lambda2, betas.ZoneYr)
+b_ZoneEff2 <- data.frame("beta.Zone"=c(b_ZoneEff$mean[7:12]), 
+                         "beta.ZoneYr"= c(b_ZoneEff$mean[1:6]) , 
+                         "Zone"=LETTERS[1:6])
+colnames(predict.lambda.sf2)[1] <- "Zone"
+betas.ZoneYr <- left_join(predict.lambda.sf2[,1], b_ZoneEff2, by="Zone")
+predict.lambda3[, 64:66] <- st_drop_geometry(betas.ZoneYr)
 MCMCtrace(samples, 
           params = c('abundance_scale'),
           ISB = TRUE,
@@ -403,50 +399,90 @@ Corn.pred5 <- as.data.frame(Corn.pred4%>%mutate(across(matches("Corn"), ~(. - at
 
 predict.lambda3 <- cbind(predict.lambda3, Corn.pred5[,2:7])
 predict.lambda3 <- cbind(predict.lambda3, sp.Z.predall)
+
 saveRDS(predict.lambda3, "./predict.grid.summer.rds")
 predict.lambda3 <- readRDS("./predict.grid.summer.rds")
 sp.Z.predall2 <- as.matrix(predict.lambda3[,14:63])
 lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
-  lambda <- exp(b_Fixed$mean[5]*yearX[i]  + b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
+  lambda <- exp(predict.lambda3$beta.Zone  + predict.lambda3$beta.ZoneYr*yearX[i] + 
+                b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
                 b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*predict.lambda3[,i+7] +
-                b_Fixed$mean[4]*predict.lambda3$lm_dist2))
+                b_Fixed$mean[4]*predict.lambda3$lm_dist2 + sp.Z.predall%*%spatspline.bs$mean))
 names(lambda.predicted.grid) <- 2019:2024
 lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(predict.lambda3, lambda.predicted.grid2)
-colnames(predict.lambda4)[64:69] <- paste0("TotalLambda", 2019:2024)
-saveRDS(predict.lambda4, "./predict.lambda4.rds")
+colnames(predict.lambda4)[67:72] <- paste0("TotalLambda", 2019:2024)
+saveRDS(predict.lambda4, "./predict.lambda4Zones.rds")
 #####################################################################################
 #                             abundance by zone                                     #
 #####################################################################################
 #add zone information to predictions
 predict.lambda5 <- cbind(predict.lambda4, predict.lambda.sf2$bear_mgmt_zone_id)
 colnames(predict.lambda5)[70] <- "Zone"
-popbyzone <- predict.lambda5%>%group_by(Zone)%>%summarise(across(matches("TotalLambda"), ~sum(.x)))%>%drop_na()
+popbyzone <- predict.lambda4%>%group_by(Zone)%>%summarise(across(matches("TotalLambda"), ~sum(.x)))%>%drop_na()
 total <- data.frame("Zone"="Total", t(colSums(popbyzone[,2:7])))
 popbyzone <- rbind(popbyzone, total)
 popbyzone2 <- pivot_longer(popbyzone, cols = -c(Zone), names_to = "Year", values_to = "lambda")
 popbyzone2$Year <- as.numeric(gsub(x = popbyzone2$Year, pattern = "TotalLambda", replacement = ""))
-ggplot(filter(popbyzone2, Zone != "Total"), aes(x=Year, y=lambda, colour = Zone)) + geom_point() + geom_line()
+ggplot(filter(popbyzone2, Zone != "Total"), aes(x=Year, y=lambda, colour = Zone)) + geom_point(size=3) + geom_line(lwd=1) +
+  scale_color_manual(values=cbPalette)
 
 #variation
 #combine MCMC chains into one
-allchains <- MCMCchains(samples[1:3], params =c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr", "spat.spline.b"), ISB = TRUE)
+allchains <- MCMCchains(samplesSummer[1:3], params =c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Zone", "b_ZoneYr", "spat.spline.b"), ISB = TRUE)
 #loop through estimated parameter at each iteration
-lambda.CIs2019 <- array(dim = c(nrow(predict.lambda), 10000))
+
 allchainssample <- allchains[sample(nrow(allchains), 10000), ]
+
+predict.df <- predict.lambda4
+CIsforZones <- function(predict.df, nZones, year, yearX) {
+  for (z in 1:nZones){
+ZonePredict <- predict.df[!is.na(predict.df$Zone) & predict.df$Zone == LETTERS[z],]
+#zfac <- ifelse(z==6, 5, z) #need to change this with E,F merge/un-merge
+lambda.CIs <- array(dim = c(nrow(ZonePredict), 10000))
+yr <- year-2018
   for(j in 1:10000){
-      lambda.CIs2019[,j] <- exp(allchainssample[j,"b_Yr"]*yearX[1] + allchainssample[j,"b_Dev"]*predict.lambda3$dev.pred2 + 
-                               allchainssample[j,"b_Forest"]*predict.lambda3$forest.pred2 + 
-                               allchainssample[j,"b_Corn"]*as.numeric(Corn.pred5[,2]) +
-                               allchainssample[j,"b_Dist"]*predict.lambda3$lm_dist2 +
-                               sp.Z.predall%*%allchainssample[j, 6:55])
+      lambda.CIs[,j] <- exp(allchainssample[j, paste0("b_Zone[", z,"]")] +
+                               allchainssample[j, paste0("b_ZoneYr[", z,"]")]*yearX[yr] +
+                               allchainssample[j,"b_Dev"]*ZonePredict$dev.pred2 + 
+                               allchainssample[j,"b_Forest"]*ZonePredict$forest.pred2 + 
+                               allchainssample[j,"b_Corn"]*ZonePredict[,paste0("Corn", yr)] +
+                               allchainssample[j,"b_Dist"]*ZonePredict$lm_dist2 +
+                               as.matrix(ZonePredict[,14:63])%*%allchainssample[j, 17:66]) #this latter column specification needs to change depending on # of zones
+                }
+    zone.lambda.distr <- colSums(lambda.CIs)
+    CL <- quantile(zone.lambda.distr, c(0.025, 0.975))
+    if(z==1){
+      CL2 <- data.frame("Zone"=LETTERS[z], "Year"=yr, "CL2.5"=CL[1], "CL97.5"=CL[2])
+    }else{
+      CL2 <- rbind(CL2, data.frame("Zone"=LETTERS[z], "Year"=yr, "CL2.5"=CL[1], "CL97.5"=CL[2]))
+    }
   }
+  return(CL2)
+}
+CIs2019 <- CIsforZones(predict.df = predict.lambda4, nZones = 6, year = 2019, yearX)
+CIs2020 <- CIsforZones(predict.df = predict.lambda4, nZones = 6, year = 2020, yearX)
+CIsZone <- lapply(2019:2024, function (i) CIsforZones(predict.df = predict.lambda3, nZones = 6, year = i, yearX))
+CIsZone2 <- rbindlist(CIsZone)
+CIsZone2$Year <- CIsZone2$Year+2018
+
+
+popbyzone3 <- left_join(popbyzone2, CIsZone2, by=c("Zone", "Year"))
+ggplot(filter(popbyzone3, Zone != "Total"), aes(x=Year, y=lambda, colour = Zone)) + 
+  geom_point(size=2) +
+  #geom_pointrange(aes(ymin = CL2.5, ymax = CL97.5,color= Zone), size=1, lineend = "square", lwd=1) + 
+  geom_line(lwd=1) +
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5,color= Zone, fill=Zone), alpha=0.3) +
+  scale_color_manual(values=cbPalette) +
+  scale_fill_manual(values=cbPalette) +
+  labs(y="Mean Relative Abundance")
+
 #calculate interval
 lambda.CIs2019.2 <- bind_cols(lambda.CIs2019, predict.lambda.sf2$bear_mgmt_zone_id)
 colnames(lambda.CIs2019.2[10001]) <- "Zone"
 zonepop.posterior <- lambda.CIs2019.2%>%group_by(Zone)
 totalpop.posterior <- lambda.CIs2019
-CL2019 <- apply(lambda.CIs2019, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+CL2019A <- apply(lambda.CIs, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
 #####################################################################################
 #                   spatial prediction across years                                 #
 #####################################################################################
@@ -460,7 +496,7 @@ saveRDS(lambda.predicted.grid, "./predictedlambdasSummer.rds")
 
 ggplot() + geom_sf(data=predict.lambda4.polys, aes(fill=TotalLambda2024), color=NA) +
   geom_sf(data=Wisconsin2, fill=NA) +
-  scale_fill_viridis(option="D") +
+  scale_fill_viridis(option="C") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         axis.text = element_blank(),        # Removes x and y axis tick numbers/text
@@ -495,11 +531,16 @@ ggplot() + geom_sf(data=predict.lambda4.polyslong, aes(fill=Lambda), color=NA) +
 #########################################################################
 #                        Fixed effects betas                            #
 #########################################################################
-b_Fixed2 <- data.frame("Var"=c("Developed", "Forest", "Corn", "Forest Disturbance", "Year"),b_Fixed)
-b_Fixed2$Var <- factor(b_Fixed2$Var, levels=rev(c("Corn", "Developed", "Forest", "Forest Disturbance", "Year")))
+b_Fixed2 <- MCMCsummary(samplesSummer[1:3], 
+                        params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist"),
+                        ISB = TRUE,
+                        round=2)
+b_Fixed2 <- data.frame("Var"=c("Developed", "Deciduous", "Corn", "Forest Disturbance"),b_Fixed2)
+b_Fixed2$Var <- factor(b_Fixed2$Var, levels=rev(c("Corn",  "Deciduous", "Developed", "Forest Disturbance")))
 b_Fixed2 <- b_Fixed2%>%arrange(Var)
 
-ggplot(b_Fixed2, aes(x=Var, y=mean, color=Var)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
+FixedPalette <- c("#E69F00",  "#56B4E9","#009E73","#F0E442", "#0072B2")
+ggplot(b_Fixed2, aes(x=Var, y=mean, colour = Var)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
   coord_flip() + geom_hline(yintercept = 0) +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
@@ -512,22 +553,71 @@ ggplot(b_Fixed2, aes(x=Var, y=mean, color=Var)) + geom_pointrange(aes(ymin=X2.5.
           hjust = 0.5
         )
   ) +
-    labs(
-    y=expression("Posterior " * beta *""),
-  ) +
-    scale_color_manual(values=rev(cbPalette[1:5])) +
+    labs(y=expression("Posterior " * beta *"")) +
+    scale_color_manual(values=FixedPalette) +
   scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
 
+b_ZoneEff3 <- MCMCsummary(samplesSummer[1:3], 
+                          params = c('b_Zone', 'b_ZoneYr'),
+                          ISB = TRUE,
+                          round=2)
+b_ZoneEff3 <- data.frame("Var"=c(paste0("Zone ", LETTERS[1:6]), paste0("ZoneYr ", LETTERS[1:6])), b_ZoneEff3, 
+                         group=as.character(rep(1:6,2)))
+b_ZoneEff3 <- b_ZoneEff3%>%arrange(desc(Var))
+b_ZoneEff3$Var <- factor(b_ZoneEff3$Var, levels=b_ZoneEff3$Var)
+
+ggplot(b_ZoneEff3, aes(x=Var, y=mean, group=group, color=group)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
+  coord_flip() + geom_hline(yintercept = 0) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position="none",
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(
+          face = ifelse(b_ZoneEff3$Var %in% c("ZoneYr D"), "bold", "plain"),
+          hjust = 0.5
+        )
+  ) +
+  labs(y=expression("Posterior " * beta *"")) +
+  scale_color_manual(values=cbPalette) +
+  scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
+
+
+########################################################################
+#                      Zone and Year Effects                           #
+########################################################################
+lambdaZoneYr <- lapply(1:length(yearX), function (i)
+lambda <- exp(b_Fixed$mean[5]*yearX[i]  + predict.lambda3$beta.Zone + 
+      predict.lambda3$beta.ZoneYr*yearX[i]*predict.lambda3$beta.Zone))
+names(lambdaZoneYr) <- 2019:2024
+lambdaZoneYr2 <- do.call(cbind, lambdaZoneYr)
+lambdaZoneYr3 <- cbind(predict.lambda3[,c(1,2,64:66)], lambdaZoneYr2)
+lambdaZoneYr3 <- st_as_sf(lambdaZoneYr3, coords=c("X", "Y"), crs=3071)
+lambdaZoneYr3long <- lambdaZoneYr3%>%pivot_longer(., cols=c(matches("\\d{4}")), names_to = "year", values_to = "lambda")
+lambdaZoneYr3long.polys <- st_buffer(lambdaZoneYr3long, dist = 1000, , endCapStyle = "SQUARE")
+ggplot() + geom_sf(data=lambdaZoneYr3long.polys, aes(fill=lambda), color=NA) +
+  facet_wrap(~year) +
+  geom_sf(data=Wisconsin2, fill=NA) +
+  scale_fill_viridis(option="D") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Mean \nabundance")
+  )
 ########################################################################
 #                        Scale Selection                               #
 ########################################################################
 #combine MCMC chains into one
-allchains.scalevars <- MCMCchains(samples[1:3], params =c("abundance_scale"), ISB = TRUE)
+allchains.scalevars <- MCMCchains(samplesSummer[1:3], params =c("abundance_scale"), ISB = TRUE)
 abundancescale1 <- data.frame(table(allchains.scalevars[,1]))
 abundancescale1 <- rbind(abundancescale1, data.frame("Var1"="4", "Freq"=0))
 abundancescale24 <- sapply(2:4, function (i) table(allchains.scalevars[,i]))
 abundancescales <- cbind(abundancescale1, abundancescale24)
-colnames(abundancescales) <- c("Buffer", "Developed", "Forest Disturbance", "Forest", "Corn")
+colnames(abundancescales) <- c("Buffer", "Developed", "Forest Disturbance", "Deciduous", "Corn")
 buffers <- c(100,500,1000,2500,5000)/1000
 abundancescales <- abundancescales%>%mutate(Buffer=case_when(Buffer==1 ~ buffers[2],
                                                              Buffer==2 ~ buffers[3],
@@ -563,18 +653,20 @@ ggplot(abundancescaleslong, aes(x=Buffer, y=Probability, fill=Var)) +
 range(sitecovs$Dist_1000)
 Dist1000.pred <- seq(-0.25, 4, length.out=100)
 Dist1000.pred.ogscale <- round(Dist1000.pred * attr(sitecovs$Dist_1000, "scaled:scale") + attr(sitecovs$Dist_1000, "scaled:center"), 2)
-lambda.dist <- exp(b_Fixed$mean[5]*yearX[1]  + b_Fixed$mean[1]*mean(sitecovs$Developed_500) + 
+lambda.dist <- exp(b_ZoneEff$mean[7]  + 
+                  b_ZoneEff$mean[1]*yearX[1] + 
+                  b_Fixed$mean[1]*mean(sitecovs$Developed_500) + 
                   b_Fixed$mean[2]*mean(sitecovs$Forest_500) + b_Fixed$mean[3]*mean(as.matrix(sitecovs[,7:11])) +
                   b_Fixed$mean[4]*Dist1000.pred)
 #get CRIs for spline
 #combine MCMC chains into one
-fixedvars <- c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Yr")
-allchains <- MCMCchains(samplesSummer[1:3], params =fixedvars)
+fixedvars <- c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Zone[1]", "b_ZoneYr[1]")
+allchains <- MCMCchains(samplesSummer[1:3], params =fixedvars, ISB=FALSE)
 #loop through estimated parameter at each iteration
 allchainssample <- allchains[sample(nrow(allchains), 10000), ]
 lambda.preds.dist <- array(dim = c(length(Dist1000.pred), 10000))
 for(j in 1:10000){
-  lambda.preds.dist[,j] <- exp(allchainssample[j,"b_Yr"]*yearX[1] + allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_500) + 
+  lambda.preds.dist[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_500) + 
                                  allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
                                  allchainssample[j,"b_Corn"]*mean(as.matrix(sitecovs[,7:11])) +
                                  allchainssample[j,"b_Dist"]*Dist1000.pred) #+  sp.Z.predall%*%allchainssample[j, 6:55]
@@ -604,14 +696,15 @@ ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F00") +
 range(sitecovs$Developed_500)
 Dev500.pred <- seq(-0.25, 6, length.out=100)
 Dev500.pred.ogscale <- round(Dev500.pred * attr(sitecovs$Developed_500, "scaled:scale") + attr(sitecovs$Developed_500, "scaled:center"), 2)
-lambda.dev <- exp(b_Fixed$mean[5]*yearX[1]  + b_Fixed$mean[1]*Dev500.pred + 
+lambda.dev <- exp(b_ZoneEff$mean[7]  + 
+                    b_ZoneEff$mean[1]*yearX[1] +  + b_Fixed$mean[1]*Dev500.pred + 
                      b_Fixed$mean[2]*mean(sitecovs$Forest_500) + b_Fixed$mean[3]*mean(as.matrix(sitecovs[,7:11])) +
                      b_Fixed$mean[4]*mean(sitecovs$Dist_1000))
 #get CRIs for spline
 #loop through estimated parameter at each iteration
 lambda.preds.dev <- array(dim = c(length(Dev500.pred), 10000))
 for(j in 1:10000){
-  lambda.preds.dev[,j] <- exp(allchainssample[j,"b_Yr"]*yearX[1] + allchainssample[j,"b_Dev"]*Dev500.pred + 
+  lambda.preds.dev[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1]  + allchainssample[j,"b_Dev"]*Dev500.pred + 
                                  allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
                                  allchainssample[j,"b_Corn"]*mean(as.matrix(sitecovs[,7:11])) +
                                  allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000)) #+  sp.Z.predall%*%allchainssample[j, 6:55]
@@ -638,6 +731,9 @@ ggplot(dev.plot.df, aes(x=Dev, y=lambda)) + geom_line(color="#56B4E9") +
 #######################################################################################################
 ############################ scrap ####################################################################
 #######################################################################################################
+predict.lambda4[,14:63] <- sp.Z.predall
+
+
 plot(inprodspline2["inprodspline"])
 plot(st_geometry(inprodspline2))
 splinestars <- st_as_stars(inprodspline2)

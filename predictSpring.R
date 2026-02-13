@@ -368,9 +368,10 @@ saveRDS(predict.lambda3, "./predict.grid.summer.rds")
 predict.lambda3 <- readRDS("./predict.grid.summer.rds")
 sp.Z.predall2 <- as.matrix(predict.lambda3[,14:63])
 lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
-  lambda <- exp(b_Fixed$mean[5]*yearX[i]  + b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
+  lambda <- exp(predict.lambda3$beta.Zone  + predict.lambda3$beta.ZoneYr*yearX[i] + 
+                  b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
                   b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*predict.lambda3[,i+7] +
-                  b_Fixed$mean[4]*predict.lambda3$lm_dist2))
+                  b_Fixed$mean[4]*predict.lambda3$lm_dist2 + sp.Z.predall%*%spatspline.bs$mean))
 names(lambda.predicted.grid) <- 2019:2024
 lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(predict.lambda3, lambda.predicted.grid2)

@@ -166,9 +166,12 @@ global_max <- max(c(inprodspline2Spring$inprodsplineSpring, inprodspline2Summer$
 common_limits <- c(global_min, global_max)
 # 0.007108554 6.018643190
 
+
+
 ggplot() + geom_sf(data=inprodspline2Summer, aes(fill=inprodsplineSummer), color=NA) +
    geom_sf(data=Wisconsin2, fill=NA) +
-  scale_fill_viridis(option="D") +
+   geom_sf(data=bearzones, color="black", fill=NA, linewidth=1.25) +
+  scale_fill_viridis(option="C") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         axis.text = element_blank(),        # Removes x and y axis tick numbers/text

@@ -113,7 +113,7 @@ table(is.na(Zones$zone))
 
 zone <- Zones%>%select(yearID, siteID, zone)%>%
   mutate(zone=ifelse(zone %in% c("E", "F"), "E,F", zone))%>%
-  mutate(zone = as.numeric(as.factor(zone)))#%>%
+  mutate(zone = as.numeric(as.factor(zone)))%>%
   pivot_wider(names_from = yearID, values_from = zone)%>%
   select(-siteID)%>%
   as.matrix()%>%

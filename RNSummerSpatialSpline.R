@@ -34,7 +34,7 @@ bearrange2 <- st_intersection(bearrange, Wisconsin2)
 #5/21-8/26 this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
 #results in n.occs column being wrong but don't think that matters
 ModelingDF <- readRDS("./ModelingDFSummer.rds")%>%st_transform(., 3071)
-ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(37:44))
+ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(40:47))
 ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
   st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18)%>%filter(BEAR_ADULT_AMT < 200) #5/21-8/26
 #remove occasions which have multiple camera versions
@@ -75,7 +75,7 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF1%>%mutate(across(c(10, 12, 14:37), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(10, 12, 14:40), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
 scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
@@ -107,12 +107,12 @@ Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'
                            Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
   st_as_sf(., coords=c("X", "Y"), crs=3071)%>%
   st_join(.,st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))%>%
-  rename(zone=bear_mgmt_zone_id)#%>%st_drop_geometry()
+  rename(zone=bear_mgmt_zone_id)%>%st_drop_geometry()
 ZoneQ <- Zones%>%group_by(zone, yearID)%>%summarise(n=n())
 table(is.na(Zones$zone))
 
 zone <- Zones%>%select(yearID, siteID, zone)%>%
-  mutate(zone=ifelse(zone %in% c("E", "F"), "E,F", zone))%>%
+  #mutate(zone=ifelse(zone %in% c("E", "F"), "E,F", zone))%>%
   mutate(zone = as.numeric(as.factor(zone)))%>%
   pivot_wider(names_from = yearID, values_from = zone)%>%
   select(-siteID)%>%
@@ -219,16 +219,31 @@ Dist_array <- Dist_array[,,c(2,3,4,5)]
 #Proportion of Forest
 Forest <- sitecovs%>%select(yearID, siteID, matches("Forest"))%>%
   pivot_longer(cols = matches("Forest"), names_pattern="(\\d+$)", names_to = "scale")
+scales25 <- scales[2:5]
 
-Forest_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+Forest_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
 for( t in 1:no.years ) {
-  for( s in 1:5) {
+  for( s in 1:4) {
     for( i in 1:nsite[t]){
-      Forest_array[ i, t, s] <- Forest[ c( Forest$siteID == i & Forest$scale == scales[s] & Forest$yearID == t), "value"]$value
+      Forest_array[ i, t, s] <- Forest[ c( Forest$siteID == i & Forest$scale == scales25[s] & Forest$yearID == t), "value"]$value
     }
   }
 }
-Forest_array <- Forest_array[,,c(2,3,4,5)]
+
+
+#Wetlands
+Wetlands <- sitecovs%>%select(yearID, siteID, matches("Wetland"))%>%
+  pivot_longer(cols = matches("Wetland"), names_pattern="(\\d+$)", names_to = "scale")
+scales25 <- scales[2:5]
+
+Wetland_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
+for( t in 1:no.years ) {
+  for( s in 1:4) {
+    for( i in 1:nsite[t]){
+      Wetland_array[ i, t, s] <- Wetlands[ c( Wetlands$siteID == i & Wetlands$scale == scales25[s] & Wetlands$yearID == t), "value"]$value
+    }
+  }
+}
 
 #Corn
 Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
@@ -362,7 +377,7 @@ constants <- list(
   sp.nknots=50,
   EVI.nknots=5,
   Zone=zone,
-  nZones=5
+  nZones=6
 )
 # Zone=zone,
 # nZones=length(unique(Zones$bear_mgmt_unit_id))
@@ -376,6 +391,7 @@ data <- list(
   Dist=Dist_array,
   Forest=Forest_array,
   Corn=Corn_array,
+  Wetland=Wetland_array,
   EVI=EVI_array,
   daysactive=daysactive_array,
   catprobs = c(0.25, 0.25, 0.25, 0.25),
@@ -413,6 +429,8 @@ RNcode <- nimbleCode({
   b_Forest ~ dnorm(0, 2)
   # regression coefficient for Corn
   b_Corn ~ dnorm(0, 2)
+  # regression coefficient for Wetland
+  b_Wetland ~ dnorm(0, 2)
   
  
   
@@ -451,6 +469,7 @@ RNcode <- nimbleCode({
   abundance_scale[2] ~ dcat(catprobs[1:4])
   abundance_scale[3] ~ dcat(catprobs[1:4])
   abundance_scale[4] ~ dcat(catprobs[1:4])
+  abundance_scale[5] ~ dcat(catprobs[1:4])
   
   
   for( t in 1:nyear ) { #loop over site then year?
@@ -460,7 +479,9 @@ RNcode <- nimbleCode({
       N[i, t] ~ dpois( lambda[ i, t ] )
       log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +  #make this a factor? 
         #scaled parameters
-        b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
+        b_Corn*Corn[i,t,abundance_scale[1]] + b_Dev*Dev[i,t,abundance_scale[2]] +
+        b_Dist*Dist[i,t,abundance_scale[3]] + b_Forest*Forest[i,t,abundance_scale[4]] + 
+        b_Wetland*Wetland[i,t,abundance_scale[5]] +
         #cam_site random effect
         s[i,t] #s[i,t] - spatial random effect
       
@@ -498,6 +519,7 @@ inits <- function() {
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
              b_Corn= runif(1, -1, 1),
+             b_Wetland= runif(1, -1, 1),
              a_version = runif(constants$nversions, -1, 1),
              a_daysactive = runif(1, -1, 1),
              a_EVI = runif(1, -1, 1),
@@ -509,15 +531,16 @@ inits <- function() {
              #eps_N = rnorm(constants$ncams, 0, 2),
              # eps_p = rnorm(constants$ncams, 0, 2),
              # sd_p = runif(1, 0, 2),
-             abundance_scale=rcat(4, c(0.25,0.25,0.25,0.25)),
+             abundance_scale=rcat(5, c(0.25,0.25,0.25,0.25)),
              rho = array(data = runif(length(Bear_All), 0, 1),
                          dim=c(maxsites,no.occs,no.years))
   )
 }
 
 # parameters to monitor
-keepers <- c('b_Dev',  "b_Zone", "b_ZoneYr",
+keepers <- c("b_Zone", "b_ZoneYr",'b_Dev',
              "b_Dist", "b_Forest", "b_Corn",
+             "b_Wetland",
              "spat.spline.b", "b",
              "a_version", "a_daysactive", "a_EVI", 
              "abundance_scale") #"b_X","b_Y",
@@ -528,7 +551,7 @@ keepers <- c('b_Dev',  "b_Zone", "b_ZoneYr",
 # see: https://groups.google.com/g/nimble-users/c/RHH9Ybh7bSI
 nc <- 3 # number of chains
 nb <- 10000 # number of initial MCMC iterations to discard
-ni <- 65000 # total number  of iterations
+ni <- 75000 # total number  of iterations
 
 # .......................................................................
 # RUN MODEL
@@ -587,9 +610,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline, EF combined"))
-saveRDS(samples2, "./RNsamplesFullModelBearRangeEFcomb.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline"))
+saveRDS(samples2, "./RNsamplesFullModelBearRangeSummer.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -602,7 +625,7 @@ MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambd
 
 PR <- rnorm(15000, 0, 2)
 MCMCtrace(samples, 
-          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Zone", "b_ZoneYr"),
+          params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"),
           ISB = TRUE,
           exact = TRUE,
           priors = PR,
@@ -610,9 +633,9 @@ MCMCtrace(samples,
           Rhat = TRUE,
           n.eff = TRUE)
 MCMCtrace(samples, 
-          params = c( "b_ZoneYr"),
-          ISB = FALSE,
-          exact = TRUE,
+          params = c( "b_ZoneYr", "b_Zone"),
+          ISB = TRUE,
+          exact = FALSE,
           priors = PR,
           pdf = FALSE,
           Rhat = TRUE,

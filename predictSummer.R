@@ -669,7 +669,8 @@ allchains <- MCMCchains(samplesSummer[1:3], params =fixedvars, ISB=FALSE)
 allchainssample <- allchains[sample(nrow(allchains), 10000), ]
 lambda.preds.dist <- array(dim = c(length(Dist1000.pred), 10000))
 for(j in 1:10000){
-  lambda.preds.dist[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_500) + 
+  lambda.preds.dist[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
+                                 allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_500) + 
                                  allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
                                  allchainssample[j,"b_Corn"]*mean(as.matrix(sitecovs[,7:11])) +
                                  allchainssample[j,"b_Dist"]*Dist1000.pred) #+  sp.Z.predall%*%allchainssample[j, 6:55]

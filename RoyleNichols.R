@@ -565,7 +565,7 @@ MCMCsummary(samples,params = "a_version", round = 2)
 
 
 PR <- rnorm(15000, 0, 2)
-MCMCtrace(samples, 
+MCMCtrace(samplesSpring[1:3], 
           params = c('b_Corn', 'b_Dev', 'b_Forest', "b_Yr", "b_Dist"),
           ISB = FALSE,
           exact = TRUE,
@@ -573,7 +573,7 @@ MCMCtrace(samples,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samples, 
+MCMCtrace(samplesSpring[1:3], 
           params = c('abundance_scale'),
           ISB = TRUE,
           exact = TRUE,

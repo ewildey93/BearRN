@@ -17,7 +17,7 @@ library(data.table)
 library(CropScapeR)
 
 
-buffers <- c(100,500,1000,2500,5000) # buffer sizes in meters, buffer size 5000 not enough memory
+buffers <- c(500,1000,2500,5000) # buffer sizes in meters, buffer size 5000 not enough memory
 df <- read_rds(paste(getwd(), "BearCPUESpring2019-2024.rds", sep="/")) #4/15-6/30
 BEARCPUE <- df%>%filter(ppn_classified >= 0.95  & year > 2018)#& days_active > 4
 BEARCPUE2 <- BEARCPUE%>%group_by(cam_site_id, year)%>%add_tally(name = "n.occ")%>%
@@ -179,8 +179,11 @@ lm_output <-
 
 
 # join pland back to camera sf object
-forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods","AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods",
-               "MixedDeciduousConiferousForest", "MixedDeciduousConiferousForestedWetland")
+forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods",
+               "MixedDeciduousConiferousForest")
+wetlandLCs <- c("AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods", "OtherEmergentWetMeadow",
+                "MixedDeciduousConiferousForestedWetland", "ConiferousForestedWetland", "BroadleavedDeciduousScrubShrub",
+                "BroadleavedEvergreenScrubShrub", "NeedleleavedScrubShrub")
 developedLCs <- c("DevelopedHighIntensity","DevelopedLowIntensity")
 
 lm_output2 <- cbind(lm_output, lapply(buffers, function(x) rowSums(lm_output[,paste0(forestLCs, "_", x)])))
@@ -189,6 +192,13 @@ colnames(lm_output2)[forestcols] <- paste0("Forest", "_",buffers)
 
 ForestProp <- lm_output2[,c(1,forestcols)]
 camsites <- left_join(camsites, ForestProp, by="cam_site_id")
+
+lm_output2 <- cbind(lm_output, lapply(buffers, function(x) rowSums(lm_output[,paste0(wetlandLCs, "_", x)])))
+wetlandcols <- grep(pattern = "c\\(", x = colnames(lm_output2))
+colnames(lm_output2)[wetlandcols] <- paste0("Wetland", "_",buffers)
+
+WetlandProp <- lm_output2[,c(1,wetlandcols)]
+camsites <- left_join(camsites, WetlandProp, by="cam_site_id")
 
 lm_output2 <- cbind(lm_output, lapply(buffers, function(x) rowSums(lm_output[,paste0(developedLCs, "_", x)])))
 devcols <- grep(pattern = "c\\(", x = colnames(lm_output2))
@@ -663,6 +673,10 @@ camsites <- camsites[,-9]
 saveRDS(camsites, "./sitevariables.rds")
 BEARCPUE5 <- left_join(BEARCPUE4,  st_drop_geometry(camsites) ,by="cam_site_id")
 saveRDS(BEARCPUE5, "./ModelingDF.rds")
+ModelingDFSpring <- readRDS("./ModelingDFSpring.rds")
+ModelingDFSpring <- ModelingDFSpring%>%select(-matches("Forest"))%>%
+  left_join(., st_drop_geometry(camsites))
+saveRDS(ModelingDFSpring, "./ModelingDFSpring.rds")
 ############################################################################################
 #####                             scrap                                                 ####
 ############################################################################################

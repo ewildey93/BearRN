@@ -15,12 +15,12 @@ library(data.table)
 library(viridis)
 
 
-samplesSpring <- readRDS("./RNsamplesFullModelBearRangeSpring3.rds")
+samplesSpring <- readRDS("./RNsamplesFullModelBearRangeSpring3GOF.rds")
 
 ####################################predict EVI spline############################################
 #predicting EVI spline
 EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
-pred.data <- expand.grid(camversion=1, daysactive=0.1947232, EVI=EVI.pred)
+pred.data <- expand.grid(camversion=1, daysactive=0.1907742, EVI=EVI.pred)
 # prediction dataset for spatial smoothing
 pred.EVI.Z_K <- (abs(outer(as.numeric(pred.data$EVI),EVI.knots,"-")))^3
 
@@ -73,7 +73,7 @@ ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="#009E73") +
 #combine MCMC chains into one
 allchains.scalevars <- MCMCchains(samplesSpring[1:3], params =c("abundance_scale"), ISB = TRUE)
 abundancescale4 <- data.frame(table(allchains.scalevars[,4]))
-abundancescale4 <- rbind(abundancescale1, data.frame("Var1"=c("2", "3", "4"), "Freq"=0))
+abundancescale4 <- rbind(abundancescale4, data.frame("Var1"=c( "3", "4"), "Freq"=0))
 abundancescale <- sapply(1:3, function (i) table(allchains.scalevars[,i]))
 abundancescales <- cbind.data.frame(abundancescale, abundancescale4$Freq)
 colnames(abundancescales) <- c("Developed", "Forest Disturbance", "Forest", "Wetlands")

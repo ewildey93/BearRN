@@ -13,9 +13,10 @@ library(ggplot2)
 library(MCMCvis)
 library(data.table)
 library(viridis)
+library(patchwork)
 
 
-samplesSummer <- readRDS("./RNsamplesFullModelBearRange5.rds")
+samplesSummer <- readRDS("./RNsamplesFullModelBearRangeSummerGOF.rds")
 bearrangeknots2 <- read.csv("./bearrangeknots.csv")
 # scale coordinates 
 mean_x <- mean(coordsdf$X)
@@ -84,8 +85,8 @@ CL <- apply(rho.preds, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
 rhoplotdf <- cbind(pred.data2, rho.mean, t(CL))
 rhoplotdf$EVI <- rhoplotdf$EVI * attr(EVI2$meanEVI, "scaled:scale") + attr(EVI2$meanEVI, "scaled:center")
 colnames(rhoplotdf)[10:11] <- c("CL2.5", "CL97.5")
-ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="#0072B2") + 
-  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.3,fill="#0072B2", color="#0072B2") +
+ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="#009E73") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.3,fill="#009E73", color="#009E73") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         plot.title = element_text(hjust = 0.5),
@@ -93,20 +94,20 @@ ggplot(rhoplotdf, aes(x=EVI, y=rho.mean)) + geom_line(color="#0072B2") +
         legend.position="none"
   ) +
   labs(
-    title="Effect of Green-Up on\n Detection",
-    y=expression("Individual Detection Probability"),
-    x="Greenness of Vegetation"
+    #title="Effect of Green-Up on\n Detection",
+    y=expression("Individual Detection Probability (r)"),
+    x="Enhanced Vegetation Index (EVI)"
   )
 
 #--------------------------------------------------------------------
 #                      detection betas
 #--------------------------------------------------------------------
-a_Fixed <- MCMCsummary(samples, 
+a_Fixed <- MCMCsummary(samplesSummer[1:3], 
                         params = c("a_version", "a_daysactive", "a_EVI"),
                         ISB = TRUE,
                         round=2)
-a_Fixed <- data.frame("Var"=c("Version 3", "Version 4", "Effort", "NDVI"),a_Fixed)
-a_Fixed$Var <- factor(a_Fixed$Var, levels=c("Version 3", "Version 4", "Effort", "NDVI"))
+a_Fixed <- data.frame("Var"=c("Version 3", "Version 4", "Effort", "EVI"),a_Fixed)
+a_Fixed$Var <- factor(a_Fixed$Var, levels=c("EVI", "Effort", "Version 4", "Version 3"))
 a_Fixed <- a_Fixed%>%arrange(Var)
 
 ggplot(a_Fixed, aes(x=Var, y=mean)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
@@ -128,12 +129,108 @@ ggplot(a_Fixed, aes(x=Var, y=mean)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5
   #scale_color_manual(values=rev(cbPalette)) +
   #scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
 
+########################################################################
+#                        Scale Selection                               #
+########################################################################
+#combine MCMC chains into one
+allchains.scalevars <- MCMCchains(samplesSummer[1:3], params =c("abundance_scale"), ISB = TRUE)
+abundancescale5 <- data.frame(table(allchains.scalevars[,5]))
+abundancescale5 <- rbind(abundancescale5, data.frame("Var1"=c("3", "4"), "Freq"=0))
+abundancescale2 <- data.frame(table(allchains.scalevars[,2]))
+abundancescale2 <- rbind(abundancescale2, data.frame("Var1"="4", "Freq"=0))
+abundancescale14 <- sapply(1:4, function (i) table(allchains.scalevars[,i]))
+abundancescales <- cbind.data.frame(abundancescale14[[1]], abundancescale2$Freq, as.vector(unname(abundancescale14[[3]])), as.vector(unname(abundancescale14[[4]])), abundancescale5$Freq)
+colnames(abundancescales) <- c("Buffer", "Corn", "Developed", "Forest Disturbance", "Deciduous Forest",  "Wetland")
+buffers <- c(500,1000,2500,5000)/1000
+abundancescales <- abundancescales%>%mutate(Buffer=case_when(Buffer==1 ~ buffers[1],
+                                                             Buffer==2 ~ buffers[2],
+                                                             Buffer==3 ~ buffers[3],
+                                                             Buffer==4 ~ buffers[4]
+))
+scalevars <- colnames(abundancescales[2:6])
+abundancescales <- abundancescales%>%mutate(across(all_of(scalevars), ~./sum(.)))
+abundancescaleslong <- pivot_longer(abundancescales, cols = scalevars, names_to = "Var", values_to = "Probability")
+abundancescaleslong$Buffer <- as.factor(abundancescaleslong$Buffer)
 
+cbPalette <- c("#F0E442","#009E73", "#D55E00","#E69F00", "#0072B2","#56B4E9")
+ggplot(abundancescaleslong, aes(x=Buffer, y=Probability, fill=Var)) + 
+  facet_wrap(~Var) +
+  geom_col() +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position="none",
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA)
+  ) +
+  labs(
+    title="Scale Selection of Environmental Variables",
+    y="Posterior Probability",
+    x="Spatial scale (km)"
+  ) +
+  scale_fill_manual(values=cbPalette)
+
+
+#########################################################################
+#                        Fixed effects betas                            #
+#########################################################################
+b_Fixed2 <- MCMCsummary(samplesSummer[1:3], 
+                        params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"),
+                        ISB = TRUE,
+                        round=2)
+b_Fixed2 <- data.frame("Var"=c("Developed", "Deciduous", "Corn", "Forest Disturbance", "Wetland"),b_Fixed2)
+b_Fixed2$Var <- factor(b_Fixed2$Var, levels=rev(c("Corn",  "Deciduous", "Developed", "Forest Disturbance", "Wetland")))
+b_Fixed2 <- b_Fixed2%>%arrange(Var)
+
+FixedPalette <- rev(c("#F0E442","#009E73", "#D55E00","#E69F00", "#0072B2"))
+ggplot(b_Fixed2, aes(x=Var, y=mean, colour = Var)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
+  coord_flip() + geom_hline(yintercept = 0) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position="none",
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(
+          face = "bold",
+          hjust = 0.5
+        )
+  ) +
+  labs(y=expression("Posterior " * beta *"")) +
+  scale_color_manual(values=FixedPalette) +
+  scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
+
+b_ZoneEff3 <- MCMCsummary(samplesSummer[1:3], 
+                          params = c('b_Zone', 'b_ZoneYr'),
+                          ISB = TRUE,
+                          round=2)
+b_ZoneEff3 <- data.frame("Var"=c(paste0("Zone ", LETTERS[1:6]), paste0("ZoneYr ", LETTERS[1:6])), b_ZoneEff3, 
+                         group=as.character(rep(1:6,2)))
+b_ZoneEff3 <- b_ZoneEff3%>%arrange(desc(Var))
+b_ZoneEff3$Var <- factor(b_ZoneEff3$Var, levels=b_ZoneEff3$Var)
+
+ggplot(b_ZoneEff3, aes(x=Var, y=mean, group=group, color=group)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
+  coord_flip() + geom_hline(yintercept = 0) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position="none",
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(
+          face = ifelse(b_ZoneEff3$Var %in% c("ZoneYr D"), "bold", "plain"),
+          hjust = 0.5
+        )
+  ) +
+  labs(y=expression("Posterior " * beta *"")) +
+  #scale_color_manual(values=cbPalette) +
+  scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
 
 #---------------------------------------------------------------------
 #                       predict overall lambda                        
 #---------------------------------------------------------------------
-predict.centers <- st_make_grid(st_union(bearrange2), cellsize=c(2000,2000), what="centers")
+cellside <- sqrt(5.24)*(1.60934)*1000 #5.24 sq mi home range estimate from Erin
+predict.centers <- st_make_grid(st_union(bearrange2), cellsize=cellside, what="centers")
 plot(st_geometry(predict.centers))
 predict.lambda <- as.data.frame(do.call(rbind, st_intersection(predict.centers, bearrange2)))%>%rename("X"="V1", "Y"="V2")
 predict.lambda.sf <- st_as_sf(predict.lambda, coords=c("X", "Y"), crs=3071)
@@ -167,7 +264,7 @@ common_limits <- c(global_min, global_max)
 # 0.007108554 6.018643190
 
 
-
+bearzones <- st_make_valid(get_spatial_data("bear_zones"))
 ggplot() + geom_sf(data=inprodspline2Summer, aes(fill=inprodsplineSummer), color=NA) +
    geom_sf(data=Wisconsin2, fill=NA) +
    geom_sf(data=bearzones, color="black", fill=NA, linewidth=1.25) +
@@ -178,12 +275,12 @@ ggplot() + geom_sf(data=inprodspline2Summer, aes(fill=inprodsplineSummer), color
         axis.ticks = element_blank(),
         plot.title = element_text(hjust = 0.5),
         legend.position = "bottom") +
-  labs(fill=expression("Mean site\nabundance"),
-       title="Effect of Spatial Spline on Abundance"
+  labs(fill=expression("Mean site\nabundance (" *lambda* ")"),
+       #title="Effect of Spatial Spline on Abundance"
        )
 colorpal <- colorNumeric(palette = "magma", 
                         domain=inprodspline2Summer$inprodsplineSummer)
-bearzones <- st_make_valid(get_spatial_data("bear_zones"))
+
 leaflet() %>% 
   # addProviderTiles("OpenStreetMap.Mapnik") %>%
   addTiles() %>%
@@ -194,7 +291,7 @@ leaflet() %>%
 # Forest and Developed land cover
 yearX <- unique(sitecovs$year)
 b_Fixed <- MCMCsummary(samplesSummer[1:3], 
-                     params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist"),
+                     params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"),
                      ISB = TRUE,
                      round=2)
 b_ZoneEff <- MCMCsummary(samplesSummer[1:3], 
@@ -251,9 +348,13 @@ lm_output <-
     values_fill = 0
   )
 
-forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods","AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods",
-               "MixedDeciduousConiferousForest", "MixedDeciduousConiferousForestedWetland")
+forestLCs <- c("AspenPaperBirch", "RedMaple", "Oak", "CentralHardwoods", "NorthernHardwoods",
+               "MixedDeciduousConiferousForest")
+wetlandLCs <- c("AspenForestedWetland", "BottomlandHardwoods", "SwampHardwoods", "OtherEmergentWetMeadow",
+                "MixedDeciduousConiferousForestedWetland", "ConiferousForestedWetland", "BroadleavedDeciduousScrubShrub",
+                "BroadleavedEvergreenScrubShrub", "NeedleleavedScrubShrub")
 developedLCs <- c("DevelopedHighIntensity","DevelopedLowIntensity")
+
 
 forest.pred <- rowSums(lm_output[,forestLCs])
 forest.pred2 <- (forest.pred - attr(sitecovs$Forest_500, "scaled:center"))/attr(sitecovs$Forest_500, "scaled:scale")
@@ -263,22 +364,25 @@ dev.pred <- rowSums(lm_output[,developedLCs])
 dev.pred2 <- (dev.pred - attr(sitecovs$Developed_500, "scaled:center"))/attr(sitecovs$Developed_500, "scaled:scale")
 predict.lambda3 <- cbind(predict.lambda3, dev.pred2)
 
+wet.pred <- rowSums(lm_output[,wetlandLCs])
+wet.pred2 <- (dev.pred - attr(sitecovs$Wetland_500, "scaled:center"))/attr(sitecovs$Wetland_500, "scaled:scale")
+predict.lambda3 <- cbind(predict.lambda3, wet.pred2)
+
 #Disturbance
 aoi <- getAOI(Wisconsin)
-products <- "HDIST2023"
+products <- "LF2024_FDist"
 email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
-path <- tempfile(fileext = ".zip")#"C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
+path <- "C:/Users/wildeefb/Documents/GeoSpatial"
 hdist2023 <-landfireAPIv2(products = products,
                           aoi = aoi, 
                           email = email,
                           projection = projection, 
                           resolution = resolution,
-                          path = path,
                           verbose = TRUE)
-lf_dir <- file.path(tempdir(), "lf")
-utils::unzip(path, exdir = lf_dir)
+lf_dir <- file.path(path, "lf")
+utils::unzip(hdist2023$path, exdir = lf_dir)
 hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
                                 full.names = TRUE, 
                                 recursive = TRUE))
@@ -531,62 +635,6 @@ ggplot() + geom_sf(data=predict.lambda4.polyslong, aes(fill=Lambda), color=NA) +
   )
 
 
-#########################################################################
-#                        Fixed effects betas                            #
-#########################################################################
-b_Fixed2 <- MCMCsummary(samplesSummer[1:3], 
-                        params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist"),
-                        ISB = TRUE,
-                        round=2)
-b_Fixed2 <- data.frame("Var"=c("Developed", "Deciduous", "Corn", "Forest Disturbance"),b_Fixed2)
-b_Fixed2$Var <- factor(b_Fixed2$Var, levels=rev(c("Corn",  "Deciduous", "Developed", "Forest Disturbance")))
-b_Fixed2 <- b_Fixed2%>%arrange(Var)
-
-FixedPalette <- c("#E69F00",  "#56B4E9","#009E73","#F0E442", "#0072B2")
-ggplot(b_Fixed2, aes(x=Var, y=mean, colour = Var)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
-  coord_flip() + geom_hline(yintercept = 0) +
-  theme(panel.background = element_blank(),
-        panel.grid = element_blank(),
-        plot.title = element_text(hjust = 0.5),
-        legend.position="none",
-        axis.line = element_line(color = "black", linewidth = 0.5),
-        axis.title.y = element_blank(),
-        axis.text.y = element_text(
-          face = ifelse(b_Fixed2$Var %in% c("Developed", "Forest Disturbance"), "bold", "plain"),
-          hjust = 0.5
-        )
-  ) +
-    labs(y=expression("Posterior " * beta *"")) +
-    scale_color_manual(values=FixedPalette) +
-  scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
-
-b_ZoneEff3 <- MCMCsummary(samplesSummer[1:3], 
-                          params = c('b_Zone', 'b_ZoneYr'),
-                          ISB = TRUE,
-                          round=2)
-b_ZoneEff3 <- data.frame("Var"=c(paste0("Zone ", LETTERS[1:6]), paste0("ZoneYr ", LETTERS[1:6])), b_ZoneEff3, 
-                         group=as.character(rep(1:6,2)))
-b_ZoneEff3 <- b_ZoneEff3%>%arrange(desc(Var))
-b_ZoneEff3$Var <- factor(b_ZoneEff3$Var, levels=b_ZoneEff3$Var)
-
-ggplot(b_ZoneEff3, aes(x=Var, y=mean, group=group, color=group)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5.), size=1, lwd=1) +
-  coord_flip() + geom_hline(yintercept = 0) +
-  theme(panel.background = element_blank(),
-        panel.grid = element_blank(),
-        plot.title = element_text(hjust = 0.5),
-        legend.position="none",
-        axis.line = element_line(color = "black", linewidth = 0.5),
-        axis.title.y = element_blank(),
-        axis.text.y = element_text(
-          face = ifelse(b_ZoneEff3$Var %in% c("ZoneYr D"), "bold", "plain"),
-          hjust = 0.5
-        )
-  ) +
-  labs(y=expression("Posterior " * beta *"")) +
-  scale_color_manual(values=cbPalette) +
-  scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
-
-
 ########################################################################
 #                      Zone and Year Effects                           #
 ########################################################################
@@ -611,68 +659,80 @@ ggplot() + geom_sf(data=lambdaZoneYr3long.polys, aes(fill=lambda), color=NA) +
         legend.position = "bottom") +
   labs(fill=expression("Mean \nabundance")
   )
-########################################################################
-#                        Scale Selection                               #
-########################################################################
-#combine MCMC chains into one
-allchains.scalevars <- MCMCchains(samplesSummer[1:3], params =c("abundance_scale"), ISB = TRUE)
-abundancescale1 <- data.frame(table(allchains.scalevars[,1]))
-abundancescale1 <- rbind(abundancescale1, data.frame("Var1"="4", "Freq"=0))
-abundancescale24 <- sapply(2:4, function (i) table(allchains.scalevars[,i]))
-abundancescales <- cbind(abundancescale1, abundancescale24)
-colnames(abundancescales) <- c("Buffer", "Developed", "Forest Disturbance", "Deciduous", "Corn")
-buffers <- c(100,500,1000,2500,5000)/1000
-abundancescales <- abundancescales%>%mutate(Buffer=case_when(Buffer==1 ~ buffers[2],
-                                                             Buffer==2 ~ buffers[3],
-                                                             Buffer==3 ~ buffers[4],
-                                                             Buffer==4 ~ buffers[5]
-                                                            ))
-scalevars <- colnames(abundancescales[2:5])
-abundancescales <- abundancescales%>%mutate(across(scalevars, ~./sum(.)))
-abundancescaleslong <- pivot_longer(abundancescales, cols = scalevars, names_to = "Var", values_to = "Probability")
-abundancescaleslong$Buffer <- as.factor(abundancescaleslong$Buffer)
 
-cbPalette <- c("#F0E442", "#56B4E9", "#009E73", "#E69F00" , "#0072B2", "#D55E00")
-ggplot(abundancescaleslong, aes(x=Buffer, y=Probability, fill=Var)) + 
-  facet_wrap(~Var) +
-  geom_col() +
+
+########################################################################
+#                Marginal effect corn                             #
+########################################################################
+range(sitecovs$Corn2500)
+Corn2500.pred <- seq(quantile(sitecovs$Corn2500, 0.025), quantile(sitecovs$Corn2500, 0.975), length.out=100)
+Corn2500.pred.ogscale <- round(Corn2500.pred * attr(sitecovs$Corn2500, "scaled:scale") + attr(sitecovs$Corn2500, "scaled:center"), 2)
+lambda.Corn <- exp(b_ZoneEff$mean[7]  + 
+                    b_ZoneEff$mean[1]*yearX[1] + 
+                    b_Fixed$mean[3]*Corn2500.pred +
+                    b_Fixed$mean[1]*mean(sitecovs$Developed_2500)+ 
+                    b_Fixed$mean[4]*mean(sitecovs$Dist_1000) +
+                    b_Fixed$mean[2]*mean(sitecovs$Forest_500) + 
+                    b_Fixed$mean[5]*mean(sitecovs$Wetland_500))
+#get CRIs for spline
+#loop through estimated parameter at each iteration
+lambda.preds.corn <- array(dim = c(length(Corn2500.pred), 10000))
+for(j in 1:10000){
+  lambda.preds.corn[,j] <- exp(allchainssample[j,"b_Zone[1]"] + 
+                                allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
+                                allchainssample[j,"b_Corn"]*Corn2500.pred  +
+                                allchainssample[j,"b_Dev"]*mean(sitecovs$Corn2500) +
+                                allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000) +
+                                allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
+                                allchainssample[j,"b_Wetland"]*mean(sitecovs$Wetland_500)
+  ) #+  sp.Z.predall%*%allchainssample[j, 6:55]
+}
+#calculate interval
+CL.lambda.corn<- apply(lambda.preds.corn, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+corn.plot.df <- cbind.data.frame(Corn2500.pred, Corn2500.pred.ogscale, lambda.Corn, t(CL.lambda.corn))
+colnames(corn.plot.df) <- c("CornScale", "Corn", "lambda", "CL2.5", "CL97.5")
+CornPlot <- ggplot(corn.plot.df, aes(x=Corn, y=lambda)) + geom_line(color="#F0E442") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#F0E442", color="#F0E442") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         plot.title = element_text(hjust = 0.5),
-        legend.position="none",
-        strip.background = element_blank(),
-        panel.border = element_rect(colour = "black", fill = NA)
-        ) +
-  labs(
-       title="Scale Selection of Environmental Variables",
-       y="Posterior Probability",
-       x="Spatial scale (km)"
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        legend.position="none"
   ) +
-  scale_fill_manual(values=cbPalette)
+  labs(
+    y=expression("Mean Site Abundance( " * lambda *")"),
+    x="Proportion of Corn Land Cover (2.5km)"
+  )
 
 #########################################################################
 #             Marginal effect disturbance                               #
 #########################################################################
 range(sitecovs$Dist_1000)
-Dist1000.pred <- seq(-0.25, 4, length.out=100)
+Dist1000.pred <- seq(quantile(sitecovs$Dist_1000, 0.025), quantile(sitecovs$Dist_1000, 0.975), length.out=100)
 Dist1000.pred.ogscale <- round(Dist1000.pred * attr(sitecovs$Dist_1000, "scaled:scale") + attr(sitecovs$Dist_1000, "scaled:center"), 2)
 lambda.dist <- exp(b_ZoneEff$mean[7]  + 
                   b_ZoneEff$mean[1]*yearX[1] + 
-                  b_Fixed$mean[1]*mean(sitecovs$Developed_500) + 
-                  b_Fixed$mean[2]*mean(sitecovs$Forest_500) + b_Fixed$mean[3]*mean(as.matrix(sitecovs[,7:11])) +
-                  b_Fixed$mean[4]*Dist1000.pred)
+                  b_Fixed$mean[3]*mean(sitecovs$Corn2500) +
+                  b_Fixed$mean[1]*mean(sitecovs$Developed_2500) + 
+                  b_Fixed$mean[4]*Dist1000.pred +
+                  b_Fixed$mean[2]*mean(sitecovs$Forest_500) + 
+                  b_Fixed$mean[5]*mean(sitecovs$Wetland_500))
+                  
+                 
 #get CRIs for spline
 #combine MCMC chains into one
-fixedvars <- c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Zone[1]", "b_ZoneYr[1]")
+fixedvars <- c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland","b_Zone[1]", "b_ZoneYr[1]")
 allchains <- MCMCchains(samplesSummer[1:3], params =fixedvars, ISB=FALSE)
 #loop through estimated parameter at each iteration
 allchainssample <- allchains[sample(nrow(allchains), 10000), ]
 lambda.preds.dist <- array(dim = c(length(Dist1000.pred), 10000))
 for(j in 1:10000){
   lambda.preds.dist[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
-                                 allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_500) + 
+                                 allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_2500) + 
                                  allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
-                                 allchainssample[j,"b_Corn"]*mean(as.matrix(sitecovs[,7:11])) +
+                                 allchainssample[j,"b_Corn"]*mean(sitecovs$Corn2500) +
+                                 allchainssample[j,"b_Wetland"]*mean(sitecovs$Wetland_500) + 
                                  allchainssample[j,"b_Dist"]*Dist1000.pred) #+  sp.Z.predall%*%allchainssample[j, 6:55]
 }
 #calculate interval
@@ -680,7 +740,8 @@ CL.lambda.dist <- apply(lambda.preds.dist, 1, function(x){quantile(x, prob = c(0
 
 dist.plot.df <- cbind.data.frame(Dist1000.pred, Dist1000.pred.ogscale, lambda.dist, t(CL.lambda.dist))
 colnames(dist.plot.df) <- c("DistScale", "Dist", "lambda", "CL2.5", "CL97.5")
-ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F00") + 
+
+DistPlot <- ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F00") + 
   geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#E69F00", color="#E69F00") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
@@ -689,7 +750,6 @@ ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F00") +
         legend.position="none"
   ) +
   labs(
-    title="Marginal Effect of Forest Disturbance on\n Site Abundance",
     y=expression("Mean Site Abundance ( " * lambda * ")"),
     x="Proportion of Forest Disturbance (1km)"
   )
@@ -697,29 +757,36 @@ ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F00") +
 ########################################################################
 #                Marginal effect developed                             #
 ########################################################################
-range(sitecovs$Developed_500)
-Dev500.pred <- seq(-0.25, 6, length.out=100)
-Dev500.pred.ogscale <- round(Dev500.pred * attr(sitecovs$Developed_500, "scaled:scale") + attr(sitecovs$Developed_500, "scaled:center"), 2)
+range(sitecovs$Developed_2500)
+Dev2500.pred <- seq(quantile(sitecovs$Developed_2500, 0.025), quantile(sitecovs$Developed_2500, 0.975), length.out=100)
+Dev2500.pred.ogscale <- round(Dev2500.pred * attr(sitecovs$Developed_2500, "scaled:scale") + attr(sitecovs$Developed_2500, "scaled:center"), 2)
 lambda.dev <- exp(b_ZoneEff$mean[7]  + 
-                    b_ZoneEff$mean[1]*yearX[1] +  + b_Fixed$mean[1]*Dev500.pred + 
-                     b_Fixed$mean[2]*mean(sitecovs$Forest_500) + b_Fixed$mean[3]*mean(as.matrix(sitecovs[,7:11])) +
-                     b_Fixed$mean[4]*mean(sitecovs$Dist_1000))
+                     b_ZoneEff$mean[1]*yearX[1] + 
+                     b_Fixed$mean[3]*mean(sitecovs$Corn2500) +
+                     b_Fixed$mean[1]*Dev2500.pred + 
+                     b_Fixed$mean[4]*mean(sitecovs$Dist_1000) +
+                     b_Fixed$mean[2]*mean(sitecovs$Forest_500) + 
+                     b_Fixed$mean[5]*mean(sitecovs$Wetland_500))
 #get CRIs for spline
 #loop through estimated parameter at each iteration
-lambda.preds.dev <- array(dim = c(length(Dev500.pred), 10000))
+lambda.preds.dev <- array(dim = c(length(Dev2500.pred), 10000))
 for(j in 1:10000){
-  lambda.preds.dev[,j] <- exp(allchainssample[j,"b_Zone[1]"] + allchainssample[j,"b_ZoneYr[1]"]*yearX[1]  + allchainssample[j,"b_Dev"]*Dev500.pred + 
-                                 allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
-                                 allchainssample[j,"b_Corn"]*mean(as.matrix(sitecovs[,7:11])) +
-                                 allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000)) #+  sp.Z.predall%*%allchainssample[j, 6:55]
+  lambda.preds.dev[,j] <- exp(allchainssample[j,"b_Zone[1]"] + 
+                                allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
+                                allchainssample[j,"b_Corn"]*mean(sitecovs$Corn2500) +
+                                allchainssample[j,"b_Dev"]*Dev2500.pred +
+                                allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000) +
+                                allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
+                                allchainssample[j,"b_Wetland"]*mean(sitecovs$Wetland_500)
+                                ) #+  sp.Z.predall%*%allchainssample[j, 6:55]
 }
 #calculate interval
 CL.lambda.dev<- apply(lambda.preds.dev, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
 
-dev.plot.df <- cbind.data.frame(Dev500.pred, Dev500.pred.ogscale, lambda.dev, t(CL.lambda.dev))
+dev.plot.df <- cbind.data.frame(Dev2500.pred, Dev2500.pred.ogscale, lambda.dev, t(CL.lambda.dev))
 colnames(dev.plot.df) <- c("DevScale", "Dev", "lambda", "CL2.5", "CL97.5")
-ggplot(dev.plot.df, aes(x=Dev, y=lambda)) + geom_line(color="#56B4E9") + 
-  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#56B4E9", color="#56B4E9") +
+DevelopedPlot <- ggplot(dev.plot.df, aes(x=Dev, y=lambda)) + geom_line(color="#D55E00") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#D55E00", color="#D55E00") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         plot.title = element_text(hjust = 0.5),
@@ -727,10 +794,115 @@ ggplot(dev.plot.df, aes(x=Dev, y=lambda)) + geom_line(color="#56B4E9") +
         legend.position="none"
   ) +
   labs(
-    title="Marginal Effect of Human Development on\n Site Abundance",
+    y=expression("Mean Site Abundance( " * lambda *")"),
+    x="Proportion of Developed Land Cover (2.5km)"
+  )
+
+########################################################################
+#                Marginal effect Forest                            #
+########################################################################
+range(sitecovs$Forest_500)
+Forest500.pred <- seq(quantile(sitecovs$Forest_500, 0.025), quantile(sitecovs$Forest_500, 0.975), length.out=100)
+Forest500.pred.ogscale <- round(Forest500.pred * attr(sitecovs$Forest_500, "scaled:scale") + attr(sitecovs$Forest_500, "scaled:center"), 2)
+lambda.forest <- exp(b_ZoneEff$mean[7]  + 
+                    b_ZoneEff$mean[1]*yearX[1] + 
+                    b_Fixed$mean[3]*mean(sitecovs$Corn2500) +
+                    b_Fixed$mean[1]*mean(sitecovs$Developed_2500) + 
+                    b_Fixed$mean[4]*mean(sitecovs$Dist_1000) +
+                    b_Fixed$mean[2]*Forest500.pred + 
+                    b_Fixed$mean[5]*mean(sitecovs$Wetland_500))
+#get CRIs for spline
+#loop through estimated parameter at each iteration
+lambda.preds.forest <- array(dim = c(length(Forest500.pred), 10000))
+for(j in 1:10000){
+  lambda.preds.forest[,j] <- exp(allchainssample[j,"b_Zone[1]"] + 
+                                allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
+                                allchainssample[j,"b_Corn"]*mean(sitecovs$Corn2500) +
+                                allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_2500) +
+                                allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000) +
+                                allchainssample[j,"b_Forest"]*Forest500.pred + 
+                                allchainssample[j,"b_Wetland"]*mean(sitecovs$Wetland_500)
+  ) #+  sp.Z.predall%*%allchainssample[j, 6:55]
+}
+#calculate interval
+CL.lambda.forest<- apply(lambda.preds.forest, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+forest.plot.df <- cbind.data.frame(Forest500.pred, Forest500.pred.ogscale, lambda.forest, t(CL.lambda.forest))
+colnames(forest.plot.df) <- c("ForestScale", "Forest", "lambda", "CL2.5", "CL97.5")
+ForestPlot <- ggplot(forest.plot.df, aes(x=Forest, y=lambda)) + geom_line(color="#009E73") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#009E73", color="#009E73") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        legend.position="none"
+  ) +
+  labs(
     y=expression("Mean Site Abundance( " * lambda *")"),
     x="Proportion of Developed Land Cover (0.5km)"
   )
+
+########################################################################
+#                Marginal effect Wetland                             #
+########################################################################
+range(sitecovs$Wetland_500)
+Wetland500.pred <- seq(quantile(sitecovs$Wetland_500, 0.025), quantile(sitecovs$Wetland_500, 0.975), length.out=100)
+Wetland500.pred.ogscale <- round(Wetland500.pred * attr(sitecovs$Wetland_500, "scaled:scale") + attr(sitecovs$Wetland_500, "scaled:center"), 2)
+lambda.wetland <- exp(b_ZoneEff$mean[7]  + 
+                    b_ZoneEff$mean[1]*yearX[1] + 
+                    b_Fixed$mean[3]*mean(sitecovs$Corn2500) +
+                    b_Fixed$mean[1]*mean(sitecovs$Developed_2500) + 
+                    b_Fixed$mean[4]*mean(sitecovs$Dist_1000) +
+                    b_Fixed$mean[2]*mean(sitecovs$Forest_500) + 
+                    b_Fixed$mean[5]*Wetland500.pred)
+#get CRIs for spline
+#loop through estimated parameter at each iteration
+lambda.preds.wetland <- array(dim = c(length(Wetland500.pred), 10000))
+for(j in 1:10000){
+  lambda.preds.wetland[,j] <- exp(allchainssample[j,"b_Zone[1]"] + 
+                                allchainssample[j,"b_ZoneYr[1]"]*yearX[1] + 
+                                allchainssample[j,"b_Corn"]*mean(sitecovs$Corn2500) +
+                                allchainssample[j,"b_Dev"]*mean(sitecovs$Developed_2500) +
+                                allchainssample[j,"b_Dist"]*mean(sitecovs$Dist_1000) +
+                                allchainssample[j,"b_Forest"]*mean(sitecovs$Forest_500) + 
+                                allchainssample[j,"b_Wetland"]*Wetland500.pred
+  ) #+  sp.Z.predall%*%allchainssample[j, 6:55]
+}
+#calculate interval
+CL.lambda.wetland<- apply(lambda.preds.wetland, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+wetland.plot.df <- cbind.data.frame(Wetland500.pred, Wetland500.pred.ogscale, lambda.wetland, t(CL.lambda.wetland))
+colnames(wetland.plot.df) <- c("WetlandScale", "Wetland", "lambda", "CL2.5", "CL97.5")
+WetlandPlot <- ggplot(wetland.plot.df, aes(x=Wetland, y=lambda)) + geom_line(color="#0072B2") + 
+  geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5), alpha=0.5,fill="#0072B2", color="#0072B2") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        legend.position="none"
+  ) +
+  labs(
+    y=expression("Mean Site Abundance( " * lambda *")"),
+    x="Proportion of Wetland Land Cover (0.5km)"
+  )
+
+##############################################################################################
+##                            ALL Marginal Effects Plots in 1                               ##
+##############################################################################################
+(CornPlot | DevelopedPlot | DistPlot ) / ( ForestPlot | WetlandPlot )
+
+
+
+
+
+
+##########################################################################################
+####                            corrplot                                              ####
+##########################################################################################
+library(corrplot)
+M = cor(sitecovs[,c(12:21, 26:33)])
+corrplot(M, type = 'upper', method = 'number')
+
 
 #######################################################################################################
 ############################ scrap ####################################################################
@@ -838,3 +1010,16 @@ inprodsplineman <- spatspline.bs$mean[1]*sp.Z.pred[,1] + spatspline.bs$mean[2]*s
   spatspline.bs$mean[45]*sp.Z.pred[,45] + spatspline.bs$mean[46]*sp.Z.pred[,46] + 
   spatspline.bs$mean[47]*sp.Z.pred[,47] + spatspline.bs$mean[48]*sp.Z.pred[,48] + 
   spatspline.bs$mean[49]*sp.Z.pred[,49] + spatspline.bs$mean[50]*sp.Z.pred[,50]
+
+
+p1 <- ggplot(mtcars) + geom_point(aes(mpg, disp))
+p2 <- ggplot(mtcars) + geom_boxplot(aes(gear, disp, group = gear))
+p3 <- ggplot(mtcars) + geom_bar(aes(carb)) # This will be the offset plot
+
+# Define the top row and insert the bottom offset plot
+(p1 + p2) / 
+  (plot_spacer() + 
+     inset_element(p3, 
+                   left = 0.2, bottom = -0.5, 
+                   right = 1.2, top = 0.5)) +
+  plot_layout(heights = c(2, 1))

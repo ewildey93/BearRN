@@ -7,6 +7,9 @@ library(purrr)
 library(tigris)
 library(cowplot)
 library(ggplot2)
+library(sswids)
+library(shadowtext)
+library(units)
 
 location <- data.frame("X"=-91.312287, "Y"=45.489776)
 locationSF <- st_as_sf(location, coords=c("X", "Y"), crs=4326)
@@ -110,9 +113,23 @@ ggplot(corndemo2, aes(x=CornProp, y=Abundance, color=as.factor(buffer_size))) + 
 
 bearzones <- get_spatial_data("bear_zones")%>%st_transform(., 3071)
 bearrangeU <- st_sf(data.frame("BearRange"="1") ,geometry = st_union(bearrange2))
+coordsdf$label <- "Unique Camera Site"
+bearea <- st_area(st_union(bearrange2))
+units(bearea) <- "km^2"
+
 bearzonesrange <- ggplot() + 
    geom_sf(data=bearrangeU, aes(fill=BearRange)) +
-  geom_sf(data=bearzones, fill=NA, color="black") + geom_sf_text(data = bearzones, aes(label = bear_mgmt_zone_id), size=9, color="black") + 
+  geom_sf(data=st_as_sf(coordsdf, coords=c("X", "Y"), crs=3071),aes(color=label)) +
+  geom_sf(data=bearzones, fill=NA, color="black") + 
+  geom_shadowtext(data = bearzones, 
+                  aes(label = bear_mgmt_zone_id, 
+                      geometry = geoms), # specify geometry for sf data
+                  stat = "sf_coordinates",
+                  size = 9,
+                  color = "black",
+                  bg.color = "white",      # color of the outline
+                  bg.r = 0.05,              # thickness of the outline
+                  show.legend = FALSE) +
   theme(axis.title = element_blank(),
         panel.grid.major = element_blank(), # Remove major gridlines
         panel.grid.minor = element_blank(), # Remove minor gridlines
@@ -121,7 +138,13 @@ bearzonesrange <- ggplot() +
         axis.ticks = element_blank(),# Ensure the panel background is blank/transparent
         panel.border = element_blank(),
         legend.title = element_blank()) +
-  scale_fill_manual(values="#0072B2", label="Bear Range")
+  scale_color_manual(values="black", label="Unique\n Camera\n Site") +
+  scale_fill_manual(values="#0072B2", label="Bear Range") +
+  guides(
+    fill = guide_legend(order = 1),
+    color = guide_legend(order = 2)
+  ) +
+  theme(legend.spacing = unit(0.05, "cm"))
 
 bearzones <- ggplot() + 
   #geom_sf(data=bearrangeU, aes(fill=BearRange)) +

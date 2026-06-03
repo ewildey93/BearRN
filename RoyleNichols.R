@@ -27,17 +27,18 @@ bearrange <- st_cast(bearrange, "POLYGON")
 bearrange2 <- st_intersection(bearrange, Wisconsin2)
 
 ModelingDF <- readRDS("./ModelingDFSpring.rds")%>%ungroup() #this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
-ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(40:47))
+ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(43:50))
 ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
   st_drop_geometry()%>%ungroup()
 ModelingDF1 <- ModelingDF1[-which(ModelingDF1$camera_version %in% c("V2,V4","V2,V3")),] #remove occasions which have multiple camera versions
+ModelingDF1 <- ModelingDF1%>%filter(occ > 3)
 #split up data frame by year and reshape to wide format for detections histories for each year
 only1occ <- ModelingDF1%>%group_by(cam_site_id, year)%>%summarise(N=n())%>%filter(N == 1)
 nrow(only1occ)
 dethist <- split(ModelingDF1, ModelingDF1$year)
 dethist <- lapply(dethist, function (x) tidyr::pivot_wider(x, id_cols = c(cam_site_id, year), names_from = occ, values_from = BEAR_ADULT_AMT, names_sort = TRUE)%>%ungroup())
 dethistall <- rbindlist(dethist)%>%group_by(year)%>%mutate(siteID=row_number())%>%ungroup()
-Dethistlong <- dethistall%>%pivot_longer(cols=3:13, names_to="occ", values_to="det")%>%
+Dethistlong <- dethistall%>%pivot_longer(cols=3:10, names_to="occ", values_to="det")%>%
   mutate(yearID=year-2018, det=ifelse(det > 0,1,0), occ=as.numeric(occ))%>%
   arrange(year, cam_site_id, occ)%>%ungroup()
 Dethistlong2 <- Dethistlong%>%group_by(yearID,siteID)%>%arrange(yearID, siteID, is.na(det), occ)%>%mutate(occre=row_number())%>%ungroup()
@@ -67,7 +68,7 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 14:18, 25:40), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(8, 10, 12, 15:43), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
 scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
 #create vector of site covariate variables
@@ -77,7 +78,7 @@ sitecovs <- ModelingDF2%>%select(all_of(sitecovcols))%>%distinct()%>%arrange(yea
   group_by(year)%>%mutate(siteID = row_number())%>%ungroup()%>%relocate(siteID)
 #make a siteID x year matrix of camera site IDs
 camsiteskey <- sitecovs%>%select(yearID, siteID, cam_site_id)%>%mutate(cam_site_id2 = as.numeric(as.factor(cam_site_id)))
-camsites <- camsiteskey%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
+camsites <- camsiteskey%>%select(-cam_site_id)%>%pivot_wider(values_from = cam_site_id2, names_from = yearID)%>%select(-siteID)%>%as.matrix()
 #make a siteID x year matrix of number of occasions
 nsurveys <- ModelingDF2%>%group_by(year)%>%mutate(siteID=as.numeric(factor(cam_site_id)))%>%
   ungroup()%>%group_by(cam_site_id,siteID,year,yearID)%>%summarise(nsurveys=n())%>%arrange(yearID, siteID)%>%ungroup()
@@ -190,7 +191,7 @@ Developed_array <- Developed_array[,,c(2:5)]
 Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
   pivot_longer(cols = matches("Dist"), names_pattern="(\\d+$)", names_to = "scale")
   
-  Dist_array <- array(NA, dim=c(1243,6,5)) #sites, years, scales
+  Dist_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
   for( t in 1:6 ) {
     for( s in 1:5) {
       for( i in 1:nsite[t]){
@@ -204,28 +205,29 @@ Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
 #Proportion of Forest
 Forest <- sitecovs%>%select(yearID, siteID, matches("Forest"))%>%
   pivot_longer(cols = matches("Forest"), names_pattern="(\\d+$)", names_to = "scale")
+scales25 <- scales[2:5]
 
-Forest_array <- array(NA, dim=c(1243,6,5)) #sites, years, scales
-for( t in 1:6 ) {
-  for( s in 1:5) {
+Forest_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
+for( t in 1:no.years ) {
+  for( s in 1:4) {
     for( i in 1:nsite[t]){
-      Forest_array[ i, t, s] <- Forest[ c( Forest$siteID == i & Forest$scale == scales[s] & Forest$yearID == t), "value"]$value
+      Forest_array[ i, t, s] <- Forest[ c( Forest$siteID == i & Forest$scale == scales25[s] & Forest$yearID == t), "value"]$value
     }
   }
 }
 
-Forest_array <- Forest_array[,,c(2:5)]
+
 
 #Corn, 
-Corn <- sitecovs%>%select(yearID, siteID, matches("Corn"))%>%
-  pivot_longer(cols = matches("Corn"), names_pattern="(\\d+$)", names_to = "scale")
+Wetlands <- sitecovs%>%select(yearID, siteID, matches("Wetland"))%>%
+  pivot_longer(cols = matches("Wetland"), names_pattern="(\\d+$)", names_to = "scale")
 scales25 <- scales[2:5]
 
-Corn_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
+Wetland_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
 for( t in 1:no.years ) {
   for( s in 1:4) {
     for( i in 1:nsite[t]){
-      Corn_array[ i, t, s] <- Corn[ c( Corn$siteID == i & Corn$scale == scales25[s] & Corn$yearID == t), "value"]$value
+      Wetland_array[ i, t, s] <- Wetlands[ c( Wetlands$siteID == i & Wetlands$scale == scales25[s] & Wetlands$yearID == t), "value"]$value
     }
   }
 }
@@ -243,7 +245,7 @@ EVI2 <- left_join(Dethistlong2, EVI)
 
 EVI_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
 for( t in 1:6 ) {
-  for( j in 1:11) {
+  for( j in 1:no.occs) {
     for( i in 1:nsite[t]){
       EVI_array[ i, j, t] <- EVI2[ c( EVI2$siteID == i & EVI2$occre == j & EVI2$yearID == t), "meanEVI"]$meanEVI
     }
@@ -288,7 +290,7 @@ days_active <- detcovs%>%dplyr::select(yearID, siteID, occ, days_active)%>%
 
   daysactive_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years
   for( t in 1:6 ) {
-    for( j in 1:11) {
+    for( j in 1:no.occs) {
       for( i in 1:nsite[t]){
         daysactive_array[ i, j, t] <- days_active[ c( days_active$siteID == i & days_active$occre == j & days_active$yearID == t), "days_active"]$days_active
       }
@@ -307,7 +309,7 @@ cam_version <- detcovs%>%select(yearID, siteID, occ, camera_version)%>%
 
 camversion_array <- array(NA, dim=c(maxsites,no.occs,no.years)) #sites, occasions, years. Do i need to remo
 for( t in 1:6 ) {
-  for( j in 1:11) {
+  for( j in 1:no.occs) {
     for( i in 1:nsite[t]){
       camversion_array[ i, j, t] <- cam_version[ c( cam_version$siteID == i & cam_version$occre == j & cam_version$yearID == t), "cam_versionID2"]$cam_versionID2
     }
@@ -349,7 +351,8 @@ constants <- list(
   sp.nknots=50,
   EVI.nknots=EVI.num.knots,
   Zone=zone,
-  nZones=6
+  nZones=6,
+  e=0.001
 ) 
 # Zone=zone,
 # nZones=length(unique(Zones$bear_mgmt_unit_id))
@@ -361,7 +364,7 @@ data <- list(
   Dev=Developed_array,
   Dist=Dist_array,
   Forest=Forest_array,
-  Corn=Corn_array,
+  Wetlands=Wetland_array,
   EVI=EVI_array,
   daysactive=daysactive_array,
   catprobs = c(0.25,0.25,0.25,0.25),
@@ -397,7 +400,7 @@ RNcode <- nimbleCode({
   # regression coefficient for Forest
   b_Forest ~ dnorm(0, 2)
   # regression coefficient for Forest
-  b_Corn ~ dnorm(0, 2)
+  b_Wetlands ~ dnorm(0, 2)
   
   for (k in 1:sp.nknots) {
     spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
@@ -439,9 +442,9 @@ for( t in 1:nyear ) { #loop over site then year?
   # Loop through only the sites that are surveyed in a given year. 
   for( i in 1:nsite[t] ){
     N[i, t] ~ dpois( lambda[ i, t ] )
-    log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +   +#make this a factor?
+    log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +#make this a factor?
       #scaled parameters
-      b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Corn*Corn[i,t,abundance_scale[4]] +
+      b_Dev*Dev[i,t,abundance_scale[1]] + b_Dist*Dist[i,t,abundance_scale[2]] + b_Forest*Forest[i,t,abundance_scale[3]] + b_Wetlands*Wetlands[i,t,abundance_scale[4]] +
       #cam_site random effect
       s[i,t] #s[i,t] - spatial random effect
     
@@ -458,6 +461,30 @@ for( t in 1:nyear ) { #loop over site then year?
       }
     }
   }
+
+#GOF
+for( t in 1:nyear ) {
+  for( i in 1:nsite[t] ){
+    for(k in 1:nsurveys[i,t]){
+      ynew[i, k, t] ~ dbern(muy[i, k, t])
+    }
+    sum.y[i,t] <- sum(y[i,1:nsurveys[i,t],t])                                                      # Summation of observed detections per site
+    sum.ynew[i,t] <- sum(ynew[i,1:nsurveys[i,t],t])                                                # Summation of replicated detection per site
+    e.count[i,t] <- sum(muy[i,1:nsurveys[i,t],t])                                                   # Expected detections per site
+    
+    
+    # Chi-square discrepancy for the actual data.
+    chi2.actual[i,t] <- pow((sum.y[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)          # e is a small constant to avoid any division by zero (Kery and Royle 2016)
+    
+    # Chi-square discrepancy for the simulated data
+    chi2.sim[i,t] <- pow((sum.ynew[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)
+  }
+}
+
+chifit.actual <- sum(chi2.actual[1:870,1:6])
+chifit.sim <- sum(chi2.sim[1:870,1:6])
+
+
 })
 
 
@@ -470,7 +497,7 @@ inits <- function() {
                         ncol = constants$nyear),
              b_Zone = runif(constants$nZones, -1, 1),
              b_ZoneYr = runif(constants$nZones, -1, 1),
-             b_Corn = runif(1, -1, 1),
+             b_Wetlands = runif(1, -1, 1),
              b_Dev = runif(1, -1, 1),
              b_Dist = runif(1, -1, 1),
              b_Forest= runif(1, -1, 1),
@@ -485,15 +512,37 @@ inits <- function() {
              # eps_p = rnorm(constants$ncams, 0, 2),
              # sd_p = runif(1, 0, 2),
              rho = array(data = runif(length(Bear_All), 0, 1),
-                         dim=c(1243,11,6)))
-}
+                         dim=c(maxsites,no.occs,no.years)),
+             ynew=array(data = rep(1, length(Bear_All)),
+                        dim=c(maxsites,no.occs,no.years)),
+             sum.y=matrix(rep(5,max(constants$nsite)*constants$nyear),
+                          nrow = max(constants$nsite),
+                          ncol = constants$nyear),
+             sum.ynew=matrix(rep(5,max(constants$nsite)*constants$nyear),
+                             nrow = max(constants$nsite),
+                             ncol = constants$nyear),
+             e.count=matrix(rep(4.5,max(constants$nsite)*constants$nyear),
+                            nrow = max(constants$nsite),
+                            ncol = constants$nyear),
+             chi2.actual=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
+                                nrow = max(constants$nsite),
+                                ncol = constants$nyear),
+             chi2.sim=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
+                             nrow = max(constants$nsite),
+                             ncol = constants$nyear),
+             chifit.actual=runif(1, 1, 100),
+             chifit.sim=runif(1, 1, 100)
+              
+             
+)}
 
 # parameters to monitor
-keepers <- c( 'b_Dev', "b_Zone", "b_ZoneYr",
-              "b_Dist", "b_Forest", "b_Corn",
-             "spat.spline.b", "b",
+keepers <- c( "b_Zone", "b_ZoneYr", 'b_Dev', 
+              "b_Dist", "b_Forest", "b_Wetlands",
+             "spat.spline.b", "b", "abundance_scale",
              "a_version", "a_daysactive", "a_EVI", 
-             "abundance_scale")
+              "chifit.actual",
+             "chifit.sim")
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
 # running with 200 iterations took about 10 minutes on my laptop with 4 cores
@@ -501,7 +550,7 @@ keepers <- c( 'b_Dev', "b_Zone", "b_ZoneYr",
 # see: https://groups.google.com/g/nimble-users/c/RHH9Ybh7bSI
 nc <- 3 # number of chains
 nb <- 10000 # number of initial MCMC iterations to discard
-ni <- 100000 # total number  of iterations
+ni <- 55000 # total number  of iterations
 
 # .......................................................................
 # RUN MODEL
@@ -552,9 +601,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            thin= 10,
                            inits=inits())
 
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline"))
-saveRDS(samples, "./RNsamplesFullModelBearRangeSpring2.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Wetlandsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline GOF"))
+saveRDS(samples2, "./RNsamplesFullModelBearRangeSpring3GOF.rds")
 
 samples <- readRDS("./RNsamples.rds")
 
@@ -565,15 +614,23 @@ MCMCsummary(samples,params = "a_version", round = 2)
 
 
 PR <- rnorm(15000, 0, 2)
-MCMCtrace(samplesSpring[1:3], 
-          params = c('b_Corn', 'b_Dev', 'b_Forest', "b_Yr", "b_Dist"),
+MCMCtrace(samples, 
+          params = c('b_Dev', "b_Dist", 'b_Forest','b_Wetlands'),
           ISB = FALSE,
           exact = TRUE,
           priors = PR,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samplesSpring[1:3], 
+MCMCtrace(samples, 
+          params = c("b_Zone", "b_ZoneYr"),
+          ISB = TRUE,
+          exact = TRUE,
+          priors = PR,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCtrace(samples, 
           params = c('abundance_scale'),
           ISB = TRUE,
           exact = TRUE,
@@ -607,6 +664,21 @@ MCMCsummary(samples,
             round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
 
+#Bayesian p-value
+MCMCtrace(samples, 
+          params = c("chifit.actual", "chifit.sim"),
+          ISB = TRUE,
+          exact = TRUE,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCsummary(samples, 
+            params = c("chifit.actual", "chifit.sim"), #still has nodes for "lambda[1243, 1]" and such
+            ISB = TRUE,
+            round=2)
+allchainsChi <- MCMCchains(samples[1:3], params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
+mean(allchainsChi[,"chifit.sim"] > allchainsChi[,"chifit.actual"]) #0.7290513
+
 runCrossValidate
 ############################################################################################
 ####                           pop by zone                                           #######
@@ -636,6 +708,18 @@ ggplot(popbyyearzone, aes(x=as.numeric(yearID), y=popbyzone2, color=bear_mgmt_zo
 
 
 ############                      scrap           ################################################
+for(i in 1:5){
+  
+  if (i == 1){
+    camsincommon <- mean(camsites[,i] %in% camsites[,i+1], na.rm = TRUE)
+  }else{
+    camsincommon <- c(camsincommon, mean(camsites[,i] %in% camsites[,i+1], na.rm = TRUE))
+  }
+  print(mean(camsincommon))
+}
+
+
+
 ggplot(HFI, aes(x=value)) + facet_wrap(~scale) + geom_histogram()
 ggplot(Forest, aes(x=value)) + facet_wrap(~scale) + geom_histogram()
 ggplot(Dist, aes(x=value)) + facet_wrap(~scale) + geom_histogram()

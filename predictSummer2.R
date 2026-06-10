@@ -7,6 +7,7 @@ library(ggplot2)
 library(dplyr)
 library(sswids)
 library(MCMCvis)
+library(tidyterra)
 
 samplesSummer <- readRDS("./RNsamplesFullModelBearRangeSummerGOF.rds")
 bearzones <- get_spatial_data("bear_zones")%>%rename(zone=bear_mgmt_zone_id)
@@ -14,6 +15,11 @@ b_Fixed <- MCMCsummary(samplesSummer[1:3],
                        params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"),
                        ISB = TRUE,
                        round=2)
+
+#get scale attributes from model site covariates
+selectedscales <- c("Corn2500", "Forest_500", "Developed_2500", "Dist_1000", "Wetland_500")
+scaleattr <- lapply(selectedscales, function (x) {scaleattr <- c(attr(sitecovs%>%pull(x), "scaled:center"), attr(sitecovs%>%pull(x), "scaled:scale"))})
+names(scaleattr) <- selectedscales
 
 #Corn
 CropRasts <- list.files("C:/Users/wildeefb/Documents/GeoSpatial/BearCrops/", full.names = TRUE)
@@ -32,6 +38,7 @@ plot(CornLC[[1]])
 temp <- CropRast2019
 res(temp) <- 5000
 CornLC5000 <- lapply(CornLC, function (x) resample(x, temp, method=mean))
+CornLC5000 <- lapply(CornLC5000, function (x) {values(x) <- (values(x)*100- scaleattr[["Corn2500"]][1])/scaleattr[["Corn2500"]][2];x})#scaled sitecov variables on percentage level
 plot(CornLC5000[[1]])
 names(CornLC5000) <- paste0("Corn", 2019:2024)
 
@@ -66,10 +73,13 @@ names(WisclandRC) <- c("Forest", "Wetland", "Developed")
 temp <- Wiscland3
 res(temp) <- 1000
 ForestLC1000 <- resample(WisclandRC[[1]], temp, method=mean)
+values(ForestLC1000) <- (values(ForestLC1000)*100-scaleattr[["Forest_500"]][1])/scaleattr[["Forest_500"]][2]
 WetlandLC1000 <- resample(WisclandRC[[2]], temp, method=mean)
+values(WetlandLC1000) <- (values(WetlandLC1000)*100-scaleattr[["Wetland_500"]][1])/scaleattr[["Wetland_500"]][2]
 temp <- Wiscland3
 res(temp) <- 5000
 DevelopedLC5000 <- resample(WisclandRC[[3]], temp, method=mean)
+values(DevelopedLC5000) <- (values(DevelopedLC5000)*100-scaleattr[["Developed_2500"]][1])/scaleattr[["Developed_2500"]][2]
 plot(DevelopedLC5000)
 
 
@@ -98,6 +108,7 @@ hdist2 <- mask(hdist2, st_transform(bearrange2, crs=crs(hdist2)))
 temp <- hdist2
 res(temp) <- 2000
 hdistLC2000 <- resample(hdist2, temp, method=mean)
+values(hdistLC2000) <- (values(hdistLC2000)*100-scaleattr[["Dist_1000"]][1])/scaleattr[["Dist_1000"]][2]
 plot(hdistLC2000)
 
 #Get all the covariates on the bear home range scale with terra::resample, method mean for finer than HR resolution and method bilinear for coarser than HR resolution
@@ -175,6 +186,8 @@ covariate_matrix <- covariate_matrix[complete.cases(covariate_matrix),]
 covariate_matrix <- left_join(as.data.frame(covariate_matrix), as.data.frame(levels(bearzonesrast)), by=join_by("Zone"=="ID"))
 
 
+
+
 b_ZoneEff <- MCMCsummary(samplesSummer[1:3], 
                          params = c("b_ZoneYr", "b_Zone"),
                          ISB = TRUE,
@@ -183,13 +196,15 @@ b_ZoneEff2 <- data.frame("beta.Zone"=c(b_ZoneEff$mean[7:12]),
                          "beta.ZoneYr"= c(b_ZoneEff$mean[1:6]) , 
                          "zone"=LETTERS[1:6])
 covariate_matrix <- left_join(covariate_matrix, b_ZoneEff2)
+
 yearX <- unique(sitecovs$year)
 lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
   lambda <- exp(covariate_matrix$beta.ZoneYr*yearX[i] + covariate_matrix$beta.Zone  + 
                   b_Fixed$mean[1]*covariate_matrix$Developed + 
                   b_Fixed$mean[2]*covariate_matrix$Forest + b_Fixed$mean[3]*covariate_matrix[,i] +
                   b_Fixed$mean[4]*covariate_matrix$Disturbance + b_Fixed$mean[5]*covariate_matrix$Wetland +
-                  covariate_matrix$SpatialSplineMean))
+                  covariate_matrix$SpatialSplineMean
+                  ))
 names(lambda.predicted.grid) <- 2019:2024
 completecells <- which(complete.cases(as.matrix(stacked_raster)))
 lambda.rast <- lapply(lambda.predicted.grid, function (x) {
@@ -236,9 +251,12 @@ CIsforZones <- function(predict.df, nZones, year, yearX) {
                               allchainssample[j,"b_Forest"]*ZonePredict$Forest + 
                               allchainssample[j,"b_Corn"]*ZonePredict[,paste0("Corn", year)] +
                               allchainssample[j,"b_Dist"]*ZonePredict$Disturbance +
+                              allchainssample[j,"b_Wetland"]*ZonePredict$Wetland +
                               (as.matrix(ZonePredict[,grep(x = colnames(ZonePredict), pattern = "Zmatrix")])%*%
-                              allchainssample[j, grep(x = colnames(allchainssample), pattern = "spat.spline.b")])) #this latter column specification needs to change depending on # of zones
+                             allchainssample[j, grep(x = colnames(allchainssample), pattern = "spat.spline.b")])
+                            ) #this latter column specification needs to change depending on # of zones
     }
+    CLcells <- apply(X = lambda.CIs, MARGIN = 1, FUN = quantile(0.975)-quantile(0.025))
     zone.lambda.distr <- colSums(lambda.CIs)
     CL <- c(mean(zone.lambda.distr),quantile(zone.lambda.distr, c(0.025, 0.5, 0.975)))
     if(z==1){
@@ -266,7 +284,12 @@ ggplot(filter(popbyzone3, zone != "Total"), aes(x=Year, y=lambda, colour = zone)
   geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5,color= zone, fill=zone), alpha=0.3) +
   scale_color_manual(values=cbPalette) +
   scale_fill_manual(values=cbPalette) +
-  labs(y="Mean Relative Abundance")
+  labs(y=expression("Predicted Relative Abundance ( "*lambda* ")"), color="Zone", fill="Zone") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.line = element_line(color = "black", linewidth = 0.5),
+  )
 
 #calculate interval
 lambda.CIs2019.2 <- bind_cols(lambda.CIs2019, predict.lambda.sf2$bear_mgmt_zone_id)
@@ -274,6 +297,29 @@ colnames(lambda.CIs2019.2[10001]) <- "Zone"
 zonepop.posterior <- lambda.CIs2019.2%>%group_by(Zone)
 totalpop.posterior <- lambda.CIs2019
 CL2019A <- apply(lambda.CIs, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+
+
+
+
+#####################################################################################
+#                   spatial prediction across years                                 #
+#####################################################################################
+lambda.rast.stack <- rast(lambda.rast)
+Wisconsin.RastCRS <- st_transform(Wisconsin2, crs=crs(lambda.rast.stack))
+ggplot() +
+  geom_spatraster(data = lambda.rast.stack) +
+  geom_sf(data=Wisconsin.RastCRS, fill=NA) +
+  scale_fill_viridis_c(na.value = "transparent", option="C") +
+  facet_wrap(~lyr) + 
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
+  )
 
 
 
@@ -301,7 +347,9 @@ for (z in 1:6){cat(paste0("b_Zone[", z,"]"), LETTERS[z])}
 
 
 lambda.predicted.grid <- lapply(1:length(yearX), function (i) 
-  lambda <- exp(covariate_matrix$beta.Zone))
+  lambda <- exp(b_Fixed$mean[1]*covariate_matrix$Developed + 
+                  b_Fixed$mean[2]*covariate_matrix$Forest + b_Fixed$mean[3]*covariate_matrix[,i] +
+                  b_Fixed$mean[4]*covariate_matrix$Disturbance + b_Fixed$mean[5]*covariate_matrix$Wetland))
 names(lambda.predicted.grid) <- 2019:2024
 lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(covariate_matrix, lambda.predicted.grid2)
@@ -321,7 +369,10 @@ CIsZone <- function(predict.df, nZones, year, yearX) {
     lambda.CIs <- array(dim = c(nrow(ZonePredict), 10000))
     yr <- year-2018
     for(j in 1:10000){
-      lambda.CIs[,j] <- exp(allchainssample[j, paste0("b_Zone[", z,"]")]) #this latter column specification needs to change depending on # of zones
+      lambda.CIs[,j] <- exp(allchainssample[j,"b_Dev"]*ZonePredict$Developed + 
+                              allchainssample[j,"b_Forest"]*ZonePredict$Forest + 
+                              allchainssample[j,"b_Corn"]*ZonePredict[,paste0("Corn", year)] +
+                              allchainssample[j,"b_Dist"]*ZonePredict$Disturbance) #this latter column specification needs to change depending on # of zones
     }
     zone.lambda.distr <- colSums(lambda.CIs)
     CL <- c(mean(zone.lambda.distr),quantile(zone.lambda.distr, c(0.025, 0.5, 0.975)))
@@ -349,3 +400,12 @@ ggplot(filter(popbyzone3, zone != "Total"), aes(x=Year, y=lambda, colour = zone)
   scale_color_manual(values=cbPalette) +
   scale_fill_manual(values=cbPalette) +
   labs(y="Mean Relative Abundance")
+
+
+lambda.predicted.fixed <- lapply(1:length(yearX), function (i) 
+  lambdas <- data.frame(ZoneYr=covariate_matrix$beta.ZoneYr*yearX[i] , Zone=covariate_matrix$beta.Zone  , 
+                  Developed=b_Fixed$mean[1]*covariate_matrix$Developed ,
+                  Forest=b_Fixed$mean[2]*covariate_matrix$Forest , Corn=b_Fixed$mean[3]*covariate_matrix[,i] ,
+                  Disturbance=b_Fixed$mean[4]*covariate_matrix$Disturbance , Wetland=b_Fixed$mean[5]*covariate_matrix$Wetland
+  ))
+lambda.predicted.fixed <-lapply(lambda.predicted.fixed, function (x) cbind (x, covariate_matrix$SpatialSplineMean))

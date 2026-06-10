@@ -702,7 +702,7 @@ CornPlot <- ggplot(corn.plot.df, aes(x=Corn, y=lambda)) + geom_line(color="#F0E4
   ) +
   labs(
     y=expression("Mean Site Abundance( " * lambda *")"),
-    x="Proportion of Corn Land Cover (2.5km)"
+    x="Corn (2.5km)"
   )
 
 #########################################################################
@@ -750,8 +750,8 @@ DistPlot <- ggplot(dist.plot.df, aes(x=Dist, y=lambda)) + geom_line(color="#E69F
         legend.position="none"
   ) +
   labs(
-    y=expression("Mean Site Abundance ( " * lambda * ")"),
-    x="Proportion of Forest Disturbance (1km)"
+    y=expression("Mean Site Abundance( " * lambda *")"),
+    x="Forest Disturbance (1km)"
   )
 
 ########################################################################
@@ -795,7 +795,7 @@ DevelopedPlot <- ggplot(dev.plot.df, aes(x=Dev, y=lambda)) + geom_line(color="#D
   ) +
   labs(
     y=expression("Mean Site Abundance( " * lambda *")"),
-    x="Proportion of Developed Land Cover (2.5km)"
+    x="Developed (2.5km)"
   )
 
 ########################################################################
@@ -839,7 +839,7 @@ ForestPlot <- ggplot(forest.plot.df, aes(x=Forest, y=lambda)) + geom_line(color=
   ) +
   labs(
     y=expression("Mean Site Abundance( " * lambda *")"),
-    x="Proportion of Developed Land Cover (0.5km)"
+    x="Hardwood Forest (0.5km)"
   )
 
 ########################################################################
@@ -883,19 +883,28 @@ WetlandPlot <- ggplot(wetland.plot.df, aes(x=Wetland, y=lambda)) + geom_line(col
   ) +
   labs(
     y=expression("Mean Site Abundance( " * lambda *")"),
-    x="Proportion of Wetland Land Cover (0.5km)"
+    x="Wetland (0.5km)"
   )
 
 ##############################################################################################
 ##                            ALL Marginal Effects Plots in 1                               ##
 ##############################################################################################
-(CornPlot | DevelopedPlot | DistPlot ) / ( ForestPlot | WetlandPlot )
 
 
+y_axis <- cowplot::get_plot_component(CornPlot, "ylab-l")
+(CornPlot | DevelopedPlot | DistPlot + plot_layout(design="AABBCC", axis_titles = "collect_y")) / ( ForestPlot | WetlandPlot + plot_layout(design = "#AABB#", axis_titles = "collect_y"))
 
+layout <-
+"AABBCC
+ #DDEE#"
 
+CornPlot + DevelopedPlot + DistPlot + ForestPlot + WetlandPlot + plot_layout(axis_titles = "collect", design = layout)
 
+wrap_plots(A=CornPlot, B=DevelopedPlot, C=DistPlot, D=ForestPlot, E=WetlandPlot) + plot_layout(design=layout, axis_titles = "collect_y")
 
+firstrow <-  CornPlot + DevelopedPlot + DistPlot + plot_layout(axis_titles = "collect")
+secondrow <- plot_spacer() + ForestPlot + WetlandPlot + plot_spacer() + plot_layout(widths = c(1,2,2,1), axis_titles = "collect")
+firstrow/secondrow
 ##########################################################################################
 ####                            corrplot                                              ####
 ##########################################################################################

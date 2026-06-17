@@ -46,6 +46,8 @@ ModelingDF1 <- ModelingDF1%>%filter(
 dethist <- split(ModelingDF1, ModelingDF1$year)
 dethist <- lapply(dethist, function (x) tidyr::pivot_wider(x, id_cols = c(cam_site_id, year), names_from = occ, values_from = BEAR_ADULT_AMT, names_sort = TRUE)%>%ungroup())
 dethistall <- rbindlist(dethist)%>%group_by(year)%>%mutate(siteID=row_number())%>%ungroup()
+dethistall$cohort <- apply(dethistall[,3:16], 1, function(x) paste0(which(is.na(x)), collapse=""))
+dethistall$cohortfact <- as.numeric(as.factor(dethistall$cohort))
 Dethistlong <- dethistall%>%pivot_longer(cols=3:16, names_to="occ", values_to="det")%>%
   mutate(yearID=year-2018, det=ifelse(det > 0,1,0), occ=as.numeric(occ))%>%
   arrange(year, cam_site_id, occ)%>%ungroup()
@@ -94,8 +96,6 @@ nsurveys2 <- nsurveys%>%pivot_wider(id_cols=siteID,names_from=yearID, values_fro
 
 # make a siteID x year matrix of scaled year
 yr <- sitecovs%>%select(yearID, year, siteID)%>%
-  mutate(year=year-2019)%>% # Reformatted (0, 1, 2, 3, 4).
-  mutate(year = as.numeric(scale(year)))%>%
   pivot_wider(names_from = yearID, values_from = year)%>%
   select(-siteID)%>%
   as.matrix()%>%
@@ -377,7 +377,8 @@ constants <- list(
   sp.nknots=50,
   EVI.nknots=5,
   Zone=zone,
-  nZones=6
+  nZones=6,
+  e=0.001
 )
 # Zone=zone,
 # nZones=length(unique(Zones$bear_mgmt_unit_id))
@@ -435,9 +436,9 @@ RNcode <- nimbleCode({
  
   
   
-  for (k in 1:sp.nknots) {
-    spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
-  }
+  # for (k in 1:sp.nknots) {
+  #   spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
+  # }
   for (k in 1:EVI.nknots) {
     b[k] ~ dnorm(0,sigma.EVI)
   }
@@ -482,7 +483,6 @@ RNcode <- nimbleCode({
         b_Corn*Corn[i,t,abundance_scale[1]] + b_Dev*Dev[i,t,abundance_scale[2]] +
         b_Dist*Dist[i,t,abundance_scale[3]] + b_Forest*Forest[i,t,abundance_scale[4]] + 
         b_Wetland*Wetland[i,t,abundance_scale[5]] +
-        #cam_site random effect
         s[i,t] #s[i,t] - spatial random effect
       
       s[i,t] <- inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
@@ -491,15 +491,36 @@ RNcode <- nimbleCode({
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
         logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + 
-          a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]]
+          a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]] do i need variation here?
         y[i, k, t] ~ dbern(muy[i, k, t])
         
         EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
+      
       }
+      
     }
   }
   
-  #PREDICTION
+  #GOF
+  for( t in 1:nyear ) {
+    for( i in 1:nsite[t] ){
+      for(k in 1:nsurveys[i,t]){
+        ynew[i, k, t] ~ dbern(muy[i, k, t])
+      }
+      sum.y[i,t] <- sum(y[i,1:nsurveys[i,t],t])                                                      # Summation of observed detections per site
+      sum.ynew[i,t] <- sum(ynew[i,1:nsurveys[i,t],t])                                                # Summation of replicated detection per site
+      e.count[i,t] <- sum(muy[i,1:nsurveys[i,t],t])                                                   # Expected detections per site
+      
+      # Chi-square discrepancy for the actual data.
+      chi2.actual[i,t] <- pow((sum.y[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)          # e is a small constant to avoid any division by zero (Kery and Royle 2016)
+      
+      # Chi-square discrepancy for the simulated data
+      chi2.sim[i,t] <- pow((sum.ynew[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)
+    }
+  }
+    
+    chifit.actual <- sum(chi2.actual[1:1071,1:6])
+    chifit.sim <- sum(chi2.sim[1:1071,1:6])
   
 
 })
@@ -533,7 +554,26 @@ inits <- function() {
              # sd_p = runif(1, 0, 2),
              abundance_scale=rcat(5, c(0.25,0.25,0.25,0.25)),
              rho = array(data = runif(length(Bear_All), 0, 1),
-                         dim=c(maxsites,no.occs,no.years))
+                         dim=c(maxsites,no.occs,no.years)),
+             ynew=array(data = rep(1, length(Bear_All)),
+                        dim=c(maxsites,no.occs,no.years)),
+             sum.y=matrix(rep(5,max(constants$nsite)*constants$nyear),
+             nrow = max(constants$nsite),
+             ncol = constants$nyear),
+             sum.ynew=matrix(rep(5,max(constants$nsite)*constants$nyear),
+                             nrow = max(constants$nsite),
+                             ncol = constants$nyear),
+             e.count=matrix(rep(4.5,max(constants$nsite)*constants$nyear),
+                            nrow = max(constants$nsite),
+                            ncol = constants$nyear),
+             chi2.actual=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
+                                nrow = max(constants$nsite),
+                                ncol = constants$nyear),
+             chi2.sim=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
+                             nrow = max(constants$nsite),
+                             ncol = constants$nyear),
+             chifit.actual=runif(1, 1, 100),
+             chifit.sim=runif(1, 1, 100)
   )
 }
 
@@ -541,9 +581,10 @@ inits <- function() {
 keepers <- c("b_Zone", "b_ZoneYr",'b_Dev',
              "b_Dist", "b_Forest", "b_Corn",
              "b_Wetland",
-             "spat.spline.b", "b",
+              "b",
              "a_version", "a_daysactive", "a_EVI", 
-             "abundance_scale") #"b_X","b_Y",
+             "abundance_scale", "chifit.actual",
+             "chifit.sim") #"b_X","b_Y", "spat.spline.b",
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
 # running with 200 iterations took about 10 minutes on my laptop with 4 cores
@@ -595,7 +636,11 @@ model_mcmc <- nimble::buildMCMC(model_conf)
 
 c_model_mcmc <- nimble::compileNimble(model_mcmc, project = model)
 c_model_mcmc$my_initializeModel
-
+c_model$simulate("y", includeData=TRUE)
+oldy <- c_model$y
+newy <- c_model$y
+oldy[1,,1]
+newy[1,,1]
 
 test <- nimble::runMCMC(c_model_mcmc, 
                            nburnin = 0, 
@@ -610,9 +655,9 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nchains = nc, 
                            thin= 5,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline"))
-saveRDS(samples2, "./RNsamplesFullModelBearRangeSummer.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc
+                                 p <- version + daysactive + EVI + EVIspline GOF"))
+saveRDS(samples2, "./RNsamplesFullModelBearRangeSummerNoSplineGOF.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -632,11 +677,11 @@ MCMCtrace(samples,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samples, 
+MCMCtrace(samplesSummer[1:3], 
           params = c( "b_ZoneYr", "b_Zone"),
           ISB = TRUE,
           exact = FALSE,
-          priors = PR,
+          #priors = PR,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
@@ -647,7 +692,7 @@ MCMCtrace(samples,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samples, 
+MCMCtrace(samplesSummer[1:3], 
           params = c('abundance_scale'),
           ISB = TRUE,
           exact = TRUE,
@@ -656,6 +701,13 @@ MCMCtrace(samples,
           n.eff = TRUE)
 MCMCtrace(samples, 
           params = c("a_version", "a_daysactive", "a_EVI"),
+          ISB = TRUE,
+          exact = TRUE,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+MCMCtrace(samples, 
+          params = c("chifit.actual", "chifit.sim"),
           ISB = TRUE,
           exact = TRUE,
           pdf = FALSE,
@@ -672,7 +724,16 @@ MCMCsummary(samples,
           params = c("b_Zone", "b_ZoneYr"), #still has nodes for "lambda[1243, 1]" and such
           ISB = TRUE,
           round=2)
+MCMCsummary(samples, 
+            params = c("chifit.actual", "chifit.sim"), #still has nodes for "lambda[1243, 1]" and such
+            ISB = TRUE,
+            round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
+
+#Bayesian p-value
+allchainsChi <- MCMCchains(samples, params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
+mean(allchainsChi[,"chifit.sim"] > allchainsChi[,"chifit.actual"]) #0.7290513
+hist(allchainsChi[,"chifit.sim"])
 
 #predicting EVI spline
 EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
@@ -750,6 +811,18 @@ samples[["chain1"]][1,6:8]
 samples[["chain2"]][1,6:8]
 samples[["chain3"]][1,6:8]
 ############                      scrap           ################################################
+for(i in 1:5){
+
+  if (i == 1){
+    camsincommon <- mean(camsites[,i] %in% camsites[,i+1], na.rm = TRUE)
+  }else{
+  camsincommon <- c(camsincommon, mean(camsites[,i] %in% camsites[,i+1], na.rm = TRUE))
+  }
+  print(mean(camsincommon))
+}
+
+
+
 badinits <- c("N[138, 1]", "N[665, 1]", "N[769, 1]", "N[564, 2]", "N[633, 3]", "N[734, 4]",
               "N[735, 4]", "N[736, 4]", "N[662, 5]", "N[715, 5]", "N[683, 6]", "N[756, 6]", "N[758, 6]",
                "N[817, 6]", "N[818, 6]")
@@ -903,3 +976,29 @@ Dethistdemo2%>%gt()%>%   tab_style(
     `6`= "Week6",
     `7`= "Week7"
   )
+
+
+
+daterange <- 
+  create_season_dates(
+    min_date = "-01-01",
+    max_date = "-12-31",
+    years = c(2019,2025)
+  )
+num_occasions <- 52
+day_occasion_df <-
+  daterange %>%
+  dplyr::mutate(season = dplyr::row_number()) %>%
+  dplyr::group_by(season) %>%
+  tidyr::nest() %>%
+  # create date sequence for each year
+  dplyr::mutate(date = purrr::map(data, date_sequence)) %>%
+  tidyr::unnest(date) %>%
+  dplyr::select(-data) %>%
+  # using row_number give day of season starting with day 1
+  dplyr::mutate(day_of_season = dplyr::row_number()) %>%
+  # split season into equal intervals (1-day, 3-day, ...1 week)
+  # ntile() assigns each day into a sampling occasion
+  dplyr::mutate(
+    occ = dplyr::ntile(day_of_season, num_occasions)) %>%
+  dplyr::ungroup()

@@ -112,7 +112,7 @@ values(hdistLC2000) <- (values(hdistLC2000)*100-scaleattr[["Dist_1000"]][1])/sca
 plot(hdistLC2000)
 
 #Get all the covariates on the bear home range scale with terra::resample, method mean for finer than HR resolution and method bilinear for coarser than HR resolution
-cellside <- sqrt(5.24)*(1.60934)*1000 #5.24 sq mi home range estimate from Erin
+cellside <- sqrt(5.24)*(1.60934)*1000 #5.24 sq mi home range estimate from Erin 3683.94, 
 temp <- CornLC5000[[1]]
 res(temp) <- cellside
 CornLCHR <- lapply(CornLC5000, function (x) resample(x, temp, method="bilinear"))
@@ -320,6 +320,74 @@ ggplot() +
         legend.position = "bottom") +
   labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
   )
+
+lambda.predicted.gridNoSpline <- lapply(1:length(yearX), function (i) 
+  lambda <- exp(covariate_matrix$beta.ZoneYr*yearX[i] + covariate_matrix$beta.Zone  + 
+                  b_Fixed$mean[1]*covariate_matrix$Developed + 
+                  b_Fixed$mean[2]*covariate_matrix$Forest + b_Fixed$mean[3]*covariate_matrix[,i] +
+                  b_Fixed$mean[4]*covariate_matrix$Disturbance + b_Fixed$mean[5]*covariate_matrix$Wetland
+  ))
+names(lambda.predicted.gridNoSpline) <- 2019:2024
+completecells <- which(complete.cases(as.matrix(stacked_raster)))
+lambda.rast.NoSpline <- lapply(lambda.predicted.gridNoSpline, function (x) {
+  rasttemp <- rast(ForestLCHR, nlyr=1)
+  terra::values(rasttemp)[completecells] <- x
+  return(rasttemp)
+})
+
+lambda.rast.stack.NoSpline <- rast(lambda.rast.NoSpline)
+Wisconsin.RastCRS <- st_transform(Wisconsin2, crs=crs(lambda.rast.stack.NoSpline))
+NoSpline2024 <- ggplot() +
+  geom_spatraster(data = lambda.rast.stack.NoSpline[[6]]) +
+  geom_sf(data=Wisconsin.RastCRS, fill=NA) +
+  scale_fill_viridis_c(na.value = "transparent", option="C", limits=c(0,6)) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
+  )
+Spline2024 <- ggplot() +
+  geom_spatraster(data = lambda.rast.stack[[6]]) +
+  geom_sf(data=Wisconsin.RastCRS, fill=NA) +
+  scale_fill_viridis_c(na.value = "transparent", option="C",  limits=c(0,6)) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
+  )
+
+NoSpline2024 + Spline2024 + plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+################################################################################
+###                         spatial spline                                   ###
+################################################################################
+Zrast3 <- exp(Zrast2)
+ggplot() +
+  geom_spatraster(data = Zrast3) +
+  geom_sf(data=Wisconsin.RastCRS, fill=NA) +
+  geom_sf(data=bearzones, color="black", fill=NA, linewidth=1.25) +
+  scale_fill_viridis_c(na.value = "transparent", option="C") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
+  )
+
+
+#---------------saving objects for supplement
+save(covariate_matrix, Wisconsin2, file="SpatialandTemporalPlots.RData")
 
 
 

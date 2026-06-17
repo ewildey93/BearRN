@@ -520,6 +520,7 @@ lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(predict.lambda3, lambda.predicted.grid2)
 colnames(predict.lambda4)[67:72] <- paste0("TotalLambda", 2019:2024)
 saveRDS(predict.lambda4, "./predict.lambda4Zones.rds")
+predict.lambda4 <- readRDS("./predict.lambda4Zones.rds")
 #####################################################################################
 #                             abundance by zone                                     #
 #####################################################################################
@@ -634,6 +635,33 @@ ggplot() + geom_sf(data=predict.lambda4.polyslong, aes(fill=Lambda), color=NA) +
   labs(fill=expression("Mean \nabundance")
   )
 
+# No Spline ---------------------------------
+predict.lambda3 <- readRDS("./predict.grid.summer.rds")
+lambda.predicted.gridNoSpline <- lapply(1:length(yearX), function (i) 
+  lambda <- exp(predict.lambda3$beta.Zone  + predict.lambda3$beta.ZoneYr*yearX[i] + 
+                  b_Fixed$mean[1]*predict.lambda3$dev.pred2 + 
+                  b_Fixed$mean[2]*predict.lambda3$forest.pred2 + b_Fixed$mean[3]*predict.lambda3[,i+7] +
+                  b_Fixed$mean[4]*predict.lambda3$lm_dist2 ))
+names(lambda.predicted.gridNoSpline) <- 2019:2024
+lambda.predicted.gridNoSpline2 <- do.call(cbind, lambda.predicted.gridNoSpline)
+predict.lambdaNoSpline <- cbind(predict.lambda3, lambda.predicted.gridNoSpline2)
+colnames(predict.lambdaNoSpline)[67:72] <- paste0("TotalLambda", 2019:2024)
+
+ggplot() + geom_sf(data=predict.lambda4.polyslong, aes(fill=Lambda), color=NA) +
+  facet_wrap(~Year) +
+  geom_sf(data=Wisconsin2, fill=NA) +
+  scale_fill_viridis(option="D") +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),        # Removes x and y axis tick numbers/text
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom") +
+  labs(fill=expression("Mean \nabundance")
+  )
+
+
+
 
 ########################################################################
 #                      Zone and Year Effects                           #
@@ -659,6 +687,7 @@ ggplot() + geom_sf(data=lambdaZoneYr3long.polys, aes(fill=lambda), color=NA) +
         legend.position = "bottom") +
   labs(fill=expression("Mean \nabundance")
   )
+
 
 
 ########################################################################

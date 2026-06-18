@@ -496,8 +496,11 @@ camsites$Lat <- st_coordinates(st_transform(camsites, crs=4326))[,2]
 #####################################################################################################
 ###                                   R Landfire                                                 ####
 #####################################################################################################
-aoi <- getAOI(Wisconsin)
-products <- "HDIST2023"
+WiscBBox <- st_as_sfc(st_bbox(Wisconsin))%>%st_sf(geometry = .)%>%st_buffer(., dist=5000)
+aoi <- getAOI(WiscBBox)
+products <- c("LF2024_FDist","LF2023_FDist", "LF2022_FDist", "LF2022_Dist21", "LF2020_Dist20", "LF2020_Dist19", "LF2020_Dist18",
+              "LF2020_Dist17", "LF2016_Dist16", "LF2016_Dist15", "LF2014_Dist14", "LF2014_Dist13", "LF2012_Dist12",
+              "LF2010_Dist10", "LF2010_Dist09")
 email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
@@ -510,7 +513,7 @@ hdist2023 <-landfireAPIv2(products = products,
                           resolution = resolution,
                           path = path,
                           verbose = TRUE)
-lf_dir <- file.path(tempdir(), "lf")
+lf_dir <- file.path(tempdir(), "lf_all")
 utils::unzip(path, exdir = lf_dir)
 hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
                                 full.names = TRUE, 
@@ -531,65 +534,86 @@ activeCat(hdist) <- 1
 
 
 hdist2 <- ifel(hdist > 1, 1, hdist)
+hdist2 <-  hdist2[[names(hdist2) != "LF2020_Dist17_CONUS"]] 
+#need to create hdist layers for 2019-2021
+for(i in 2019:2021){
+  years <- (i-10):i
+  layerpatterns <- paste0("Dist", substr(x = years,3,4), collapse = "|")
+  layernames <- grep(pattern = layerpatterns, x = names(hdist2), value = TRUE)
+  fdistyr <- sum(hdist2[[ layernames ]])
+  fdistyr <- ifel(fdistyr > 1, 1, fdistyr)
+  names(fdistyr) <- paste0("FDist", i)
+  hdist2 <- c(hdist2, fdistyr)
+}
+
 plot(hdist)
 plot(hdist2)
+FDists <- grep(pattern = "FDist", x = names(hdist2), value = TRUE)
+hdist3 <- hdist2[[FDists]]
+names(hdist3)[1:3] <- paste0("FDist", 2024:2022)
+hdist3 <- hdist3[[order(names(hdist3))]]
+camsiteyearsFDist <- lapply(camsiteyears, function (x) st_transform(x, crs(hdist3[[1]])))
+hdistlist <- as.list(hdist3)
 # Wiscland2 has 30m resolution
 
 # Wiscland 3 prop land cover
+buffers2=buffers %>% 
+  set_names()
 lm_output <- 
-  buffers %>% 
-  set_names() %>% 
-  # produce a dataframe after this is all done
-  map_dfr( 
-    ~sample_lsm(
-      # raster layer
-      landscape = hdist2,
-      # camera locations
-      y = camsites,
-      # get landcover class level metrics
-      level = "class",
-      # return NA values for classes not in buffer
-      # all_classes = TRUE, 
-      # camera site IDs here
-      plot_id = camsites$cam_site_id,
-      # can do multiple metrics at once
-      what = 'lsm_c_pland',
-      # buffer sizes to use
-      size = ., 
-      # default is square buffer
-      shape = "circle", 
-      # turn warnings on or off
-      verbose = FALSE 
-    ), 
-    # get buffer size column in the output
-    .id = "buffer_size"
+  mapply(x= hdistlist, y=camsiteyearsFDist,
+         # produce a dataframe after this is all done
+         \(x,y) lapply(buffers2, 
+                       \(z) sample_lsm(
+                         # raster layer
+                         landscape = x,
+                         # camera locations
+                         y = y,
+                         # get landcover class level metrics
+                         level = "class",
+                         # return NA values for classes not in buffer
+                         # all_classes = TRUE, 
+                         # camera site IDs here
+                         plot_id = y$cam_site_id,
+                         # can do multiple metrics at once
+                         what = 'lsm_c_pland',
+                         # buffer sizes to use
+                         size = z, 
+                         # default is square buffer
+                         shape = "circle", 
+                         # turn warnings on or off
+                         verbose = FALSE 
+                       )
+         ), SIMPLIFY=FALSE
   )
+names(lm_output) <- 2019:2024
 
-
-lm_output$label <- ifelse(lm_output$class == 0, "10+", "0-10")
-
-# in this data frame plot_id = camera ID
-# class = landcover type
-# value = % of that landcover type in the buffer
-# make each landcover type x buffer into a column
-lm_output <- 
-  lm_output %>%
+lm_output2 <- rbindlist(lapply(lm_output, function(x) rbindlist(x, idcol = "buffer_size")), idcol="year")
+lm_output3 <- lm_output2%>%filter(class==1)
+Disturbance <- 
+  lm_output2 %>%select(-percentage_inside)%>%
+  mutate(class=as.factor(class))%>%
   # MAY NEED TO ADD distinct() HERE???
   #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
   pivot_wider(
-    id_cols = plot_id,
-    names_from = c(label, buffer_size),
-    values_from = c(value),
+    names_from = buffer_size,
+    names_prefix="dist",
+    values_from = value,
     # give class 0 if it doesn't exist in buffer
     values_fill = 0
   ) %>%
   # clean up names
   rename(cam_site_id = plot_id)
 
-lm_output <- lm_output%>%select(-matches("\\+"))
-colnames(lm_output)[2:6] <- gsub(x = colnames(lm_output)[2:6], pattern = "0-10", "Dist")
-camsites <- left_join(camsites, lm_output)
-
+Disturbance2 <- Disturbance%>%group_by(cam_site_id, year)%>%
+  complete(class, fill = list(dist500 = 0, dist1000=0, dist2500=0, dist5000=0))%>%
+  filter(class == 1)
+Disturbance2$season <- as.numeric(Disturbance2$year)-2018
+Disturbance2$year <- as.numeric(Disturbance2$year)
+ModelingDFSummer <- readRDS("./ModelingDFSummer.rds")
+ModelingDFSummer <- left_join(ModelingDFSummer, Disturbance2)%>%select(-c(40:44))
+ModelingDFSummer <- ModelingDFSummer[,c(1:26, 40:43, 32:39)]
+colnames(ModelingDFSummer)[27:30] <- paste0("Dist_", c(500,1000,2500,5000))
+saveRDS(ModelingDFSummer, "./ModelingDFSummer.rds")
 #########################################################################################
 ####                             CropScape                                          #####
 #########################################################################################

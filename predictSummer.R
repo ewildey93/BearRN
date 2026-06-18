@@ -370,18 +370,21 @@ predict.lambda3 <- cbind(predict.lambda3, wet.pred2)
 
 #Disturbance
 aoi <- getAOI(Wisconsin)
-products <- "LF2024_FDist"
+products <- c("LF2023_FDist", "LF2022_FDist", "LF2022_Dist21", "LF2020_Dist20", "LF2020_Dist19", "LF2020_Dist18",
+              "LF2020_Dist17", "LF2016_Dist16", "LF2016_Dist15", "LF2014_Dist14", "LF2014_Dist13", "LF2012_Dist12",
+              "LF2010_Dist10", "LF2010_Dist09")
 email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
-path <- "C:/Users/wildeefb/Documents/GeoSpatial"
+path <- "C:/Users/wildeefb/Documents/GeoSpatial/lf_all.zip"
 hdist2023 <-landfireAPIv2(products = products,
+                          path=path,
                           aoi = aoi, 
                           email = email,
                           projection = projection, 
                           resolution = resolution,
                           verbose = TRUE)
-lf_dir <- file.path(path, "lf")
+lf_dir <- "C:/Users/wildeefb/Documents/GeoSpatial/lf_all"
 utils::unzip(hdist2023$path, exdir = lf_dir)
 hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
                                 full.names = TRUE, 

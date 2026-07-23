@@ -505,7 +505,7 @@ email <- "eli.wildey@wisconsin.gov"
 projection <- 3071
 resolution <- 90
 path <- tempfile(fileext = ".zip")#"C:/Users/wildeefb/Documents/GeopSpatial/LANDFIRE/HDist2023.zip"
-lf_dir <- "C:/Users/wildeefb/Documents/GeoSpatial/LANDFIRE/"
+lf_dir <- "C:/Users/wildeefb/Documents/GeoSpatial"
 hdist2023 <-landfireAPIv2(products = products,
                           aoi = aoi, 
                           email = email,
@@ -513,11 +513,11 @@ hdist2023 <-landfireAPIv2(products = products,
                           resolution = resolution,
                           path = path,
                           verbose = TRUE)
-lf_dir <- file.path(tempdir(), "lf_all")
+lf_dir <- file.path(lf_dir, "lf_all")
 utils::unzip(path, exdir = lf_dir)
 hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
                                 full.names = TRUE, 
-                                recursive = TRUE))
+                                recursive = TRUE)[2])
 dbf <- list.files(lf_dir, pattern = ".dbf$",
                   full.names = TRUE,
                   recursive = TRUE)
@@ -526,11 +526,12 @@ dbf_tbl  <- foreign::read.dbf(dbf)
 dbf2 <- left_join(dbf_tbl, HDistLU, by=join_by(Value ==VALUE))%>%mutate(EarlySuccess=ifelse(Value > 0, "0-10", "10+"))
 levels(hdist) <- dbf_tbl[,c(1,10)]
 hdist <- addCats(hdist, value=dbf_tbl[,c(4:9)])
-cats(hdist)
-activeCat(hdist)
-levels(hdist)
-plot(hdist)
+cats(hdist[[1]])
+activeCat(hdist[[1]])
+levels(hdist[[1]])
+plot(hdist[[2]])
 activeCat(hdist) <- 1
+hdist <- hdist[[names(hdist) %in% c("FDist2019", "FDist2020", "FDist2021")]]
 
 
 hdist2 <- ifel(hdist > 1, 1, hdist)
@@ -538,25 +539,30 @@ hdist2 <-  hdist2[[names(hdist2) != "LF2020_Dist17_CONUS"]]
 #need to create hdist layers for 2019-2021
 for(i in 2019:2021){
   years <- (i-10):i
+  print(years)
   layerpatterns <- paste0("Dist", substr(x = years,3,4), collapse = "|")
+  print(layerpatterns)
   layernames <- grep(pattern = layerpatterns, x = names(hdist2), value = TRUE)
+  print(layernames)
   fdistyr <- sum(hdist2[[ layernames ]])
   fdistyr <- ifel(fdistyr > 1, 1, fdistyr)
   names(fdistyr) <- paste0("FDist", i)
-  hdist2 <- c(hdist2, fdistyr)
+  if(i-2018 == 1){
+  hdist3 <- c(hdist2[[grep(pattern = "FDist", x = names(hdist2), value=TRUE)]], fdistyr)
+  }else{
+  hdist3 <- c(hdist3, fdistyr)
+  }
 }
 
 plot(hdist)
 plot(hdist2)
-FDists <- grep(pattern = "FDist", x = names(hdist2), value = TRUE)
-hdist3 <- hdist2[[FDists]]
 names(hdist3)[1:3] <- paste0("FDist", 2024:2022)
 hdist3 <- hdist3[[order(names(hdist3))]]
-camsiteyearsFDist <- lapply(camsiteyears, function (x) st_transform(x, crs(hdist3[[1]])))
-hdistlist <- as.list(hdist3)
+camsiteyearsFDist <- lapply(camsiteyears, function (x) st_transform(x, crs(hdist2[[1]])))
+hdistlist <- list(hdist2[[1]], hdist2[[2]], hdist2[[3]], hdist2[[3]], hdist2[[3]], hdist2[[3]])
 # Wiscland2 has 30m resolution
 
-# Wiscland 3 prop land cover
+# disturbance new way
 buffers2=buffers %>% 
   set_names()
 lm_output <- 
@@ -609,8 +615,70 @@ Disturbance2 <- Disturbance%>%group_by(cam_site_id, year)%>%
   filter(class == 1)
 Disturbance2$season <- as.numeric(Disturbance2$year)-2018
 Disturbance2$year <- as.numeric(Disturbance2$year)
+colnames(Disturbance2)[8:11] <- paste0(colnames(Disturbance2)[8:11], "FDist")
+
+# disturbance old way
+# Wiscland 3 prop land cover
+lm_output <- 
+  buffers %>% 
+  set_names() %>% 
+  # produce a dataframe after this is all done
+  map_dfr( 
+    ~sample_lsm(
+      # raster layer
+      landscape = hdist2[[1]],
+      # camera locations
+      y = camsites,
+      # get landcover class level metrics
+      level = "class",
+      # return NA values for classes not in buffer
+      # all_classes = TRUE, 
+      # camera site IDs here
+      plot_id = camsites$cam_site_id,
+      # can do multiple metrics at once
+      what = 'lsm_c_pland',
+      # buffer sizes to use
+      size = ., 
+      # default is square buffer
+      shape = "circle", 
+      # turn warnings on or off
+      verbose = FALSE 
+    ), 
+    # get buffer size column in the output
+    .id = "buffer_size"
+  )
+
+
+lm_output$label <- ifelse(lm_output$class == 0, "10+", "0-10")
+
+# in this data frame plot_id = camera ID
+# class = landcover type
+# value = % of that landcover type in the buffer
+# make each landcover type x buffer into a column
+lm_output <- 
+  lm_output %>%
+  # MAY NEED TO ADD distinct() HERE???
+  #distinct() %>% # this removes duplicate rows before pivot. Not sure why there are duplicate rows in the first place
+  pivot_wider(
+    id_cols = plot_id,
+    names_from = c(label, buffer_size),
+    values_from = c(value),
+    # give class 0 if it doesn't exist in buffer
+    values_fill = 0
+  ) %>%
+  # clean up names
+  rename(cam_site_id = plot_id)
+
+lm_output <- lm_output%>%select(-matches("\\+"))
+colnames(lm_output)[2:6] <- gsub(x = colnames(lm_output)[2:6], pattern = "0-10", "Dist")
+colnames(lm_output)[2:5] <- paste0(colnames(lm_output)[2:5], "_2024")
+
+
+
 ModelingDFSummer <- readRDS("./ModelingDFSummer.rds")
-ModelingDFSummer <- left_join(ModelingDFSummer, Disturbance2)%>%select(-c(40:44))
+ModelingDFSummer <- left_join(ModelingDFSummer, Disturbance2)
+ModelingDFSummer <- left_join(ModelingDFSummer, lm_output)
+ModelingDFSummer <- ModelingDFSummer%>%select(-c(39:43))
 ModelingDFSummer <- ModelingDFSummer[,c(1:26, 40:43, 32:39)]
 colnames(ModelingDFSummer)[27:30] <- paste0("Dist_", c(500,1000,2500,5000))
 saveRDS(ModelingDFSummer, "./ModelingDFSummer.rds")
@@ -1022,5 +1090,14 @@ lat_lon <- sin_to_ll(arcachon_lc$xllcorner, arcachon_lc$yllcorner)
 # bind with the original dataframe
 subset <- cbind(arcachon_lc, lat_lon)
 
+disturbances <- left_join(ModelingDFSummer[,c(1:3,13, 27:30)], Disturbance2[,-c(3:7)])
+
+library(ggpubr)
+ggplot(disturbances, aes(x=dist1000, y=Dist_1000)) + geom_point() + geom_smooth(method = "lm") +
+  stat_cor(method = "pearson", label.x = 4, label.y = 30)
 
 
+library(corrplot)
+cor(st_drop_geometry(ModelingDFSummer[,c(27:30,39:46)]))
+M = cor(st_drop_geometry(ModelingDFSummer[,c(27:30,39:46)]))
+corrplot(M, type = 'upper', method = 'number')

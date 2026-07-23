@@ -8,6 +8,8 @@ library(dplyr)
 library(sswids)
 library(MCMCvis)
 library(tidyterra)
+library(patchwork)
+library(data.table)
 
 samplesSummer <- readRDS("./RNsamplesFullModelBearRangeSummerGOF.rds")
 bearzones <- get_spatial_data("bear_zones")%>%rename(zone=bear_mgmt_zone_id)
@@ -38,7 +40,7 @@ plot(CornLC[[1]])
 temp <- CropRast2019
 res(temp) <- 5000
 CornLC5000 <- lapply(CornLC, function (x) resample(x, temp, method=mean))
-CornLC5000 <- lapply(CornLC5000, function (x) {values(x) <- (values(x)*100- scaleattr[["Corn2500"]][1])/scaleattr[["Corn2500"]][2];x})#scaled sitecov variables on percentage level
+CornLC5000 <- lapply(CornLC5000, function (x) {terra::values(x) <- (terra::values(x)*100- scaleattr[["Corn2500"]][1])/scaleattr[["Corn2500"]][2];x})#scaled sitecov variables on percentage level
 plot(CornLC5000[[1]])
 names(CornLC5000) <- paste0("Corn", 2019:2024)
 
@@ -73,18 +75,18 @@ names(WisclandRC) <- c("Forest", "Wetland", "Developed")
 temp <- Wiscland3
 res(temp) <- 1000
 ForestLC1000 <- resample(WisclandRC[[1]], temp, method=mean)
-values(ForestLC1000) <- (values(ForestLC1000)*100-scaleattr[["Forest_500"]][1])/scaleattr[["Forest_500"]][2]
+terra::values(ForestLC1000) <- (terra::values(ForestLC1000)*100-scaleattr[["Forest_500"]][1])/scaleattr[["Forest_500"]][2]
 WetlandLC1000 <- resample(WisclandRC[[2]], temp, method=mean)
-values(WetlandLC1000) <- (values(WetlandLC1000)*100-scaleattr[["Wetland_500"]][1])/scaleattr[["Wetland_500"]][2]
+terra::values(WetlandLC1000) <- (terra::values(WetlandLC1000)*100-scaleattr[["Wetland_500"]][1])/scaleattr[["Wetland_500"]][2]
 temp <- Wiscland3
 res(temp) <- 5000
 DevelopedLC5000 <- resample(WisclandRC[[3]], temp, method=mean)
-values(DevelopedLC5000) <- (values(DevelopedLC5000)*100-scaleattr[["Developed_2500"]][1])/scaleattr[["Developed_2500"]][2]
+terra::values(DevelopedLC5000) <- (terra::values(DevelopedLC5000)*100-scaleattr[["Developed_2500"]][1])/scaleattr[["Developed_2500"]][2]
 plot(DevelopedLC5000)
 
 
 path <- "C:/Users/wildeefb/Documents/GeoSpatial"
-lf_dir <- file.path(path, "lf")
+lf_dir <- file.path(path, "lf2024")
 hdist <- terra::rast(list.files(lf_dir, pattern = ".tif$", 
                                 full.names = TRUE, 
                                 recursive = TRUE))
@@ -101,18 +103,18 @@ plot(hdist)
 activeCat(hdist) <- 1
 
 
-hdist2 <- ifel(hdist>0, 1, hdist)
+hdist2 <- ifel(hdist>1, 1, hdist)
 hdist2 <- project(hdist2, crs(CropRast2019))
 hdist2 <- crop(hdist2, st_transform(bearrange2, crs=crs(hdist2)))
 hdist2 <- mask(hdist2, st_transform(bearrange2, crs=crs(hdist2)))
 temp <- hdist2
 res(temp) <- 2000
 hdistLC2000 <- resample(hdist2, temp, method=mean)
-values(hdistLC2000) <- (values(hdistLC2000)*100-scaleattr[["Dist_1000"]][1])/scaleattr[["Dist_1000"]][2]
+terra::values(hdistLC2000) <- (terra::values(hdistLC2000)*100-scaleattr[["Dist_1000"]][1])/scaleattr[["Dist_1000"]][2]
 plot(hdistLC2000)
 
 #Get all the covariates on the bear home range scale with terra::resample, method mean for finer than HR resolution and method bilinear for coarser than HR resolution
-cellside <- sqrt(5.24)*(1.60934)*1000 #5.24 sq mi home range estimate from Erin 3683.94, 
+cellside <- sqrt(8)*(1.60934)*1000 #5.24 sq mi home range estimate from Erin 3683.94, 
 temp <- CornLC5000[[1]]
 res(temp) <- cellside
 CornLCHR <- lapply(CornLC5000, function (x) resample(x, temp, method="bilinear"))
@@ -218,7 +220,7 @@ lambda.predicted.grid2 <- do.call(cbind, lambda.predicted.grid)
 predict.lambda4 <- cbind(covariate_matrix, lambda.predicted.grid2)
 colnames(predict.lambda4)[66:71] <- paste0("TotalLambda", 2019:2024)
 saveRDS(predict.lambda4, "./predict.lambda4Zones.rds")
-
+predict.lambda4 <- readRDS("./predict.lambda4Zones.rds")
 #####################################################################################
 #                             abundance by zone                                     #
 #####################################################################################
@@ -256,7 +258,6 @@ CIsforZones <- function(predict.df, nZones, year, yearX) {
                              allchainssample[j, grep(x = colnames(allchainssample), pattern = "spat.spline.b")])
                             ) #this latter column specification needs to change depending on # of zones
     }
-    CLcells <- apply(X = lambda.CIs, MARGIN = 1, FUN = quantile(0.975)-quantile(0.025))
     zone.lambda.distr <- colSums(lambda.CIs)
     CL <- c(mean(zone.lambda.distr),quantile(zone.lambda.distr, c(0.025, 0.5, 0.975)))
     if(z==1){
@@ -277,14 +278,15 @@ CIsZone2$Year <- CIsZone2$Year+2018
 
 popbyzone3 <- left_join(popbyzone2, CIsZone2, by=join_by("zone"=="Zone", "Year"))
 cbPalette <- c("#F0E442","#009E73", "#D55E00","#E69F00", "#0072B2","#56B4E9")
-ggplot(filter(popbyzone3, zone != "Total"), aes(x=Year, y=lambda, colour = zone)) + 
+RNplot <- ggplot(filter(popbyzone3, zone != "Total"), aes(x=Year, y=lambda, colour = zone)) + 
   geom_point(size=2) +
   #geom_pointrange(aes(ymin = CL2.5, ymax = CL97.5,color= Zone), size=1, lineend = "square", lwd=1) + 
   geom_line(lwd=1) +
   geom_ribbon(aes(ymin = CL2.5, ymax = CL97.5,color= zone, fill=zone), alpha=0.3) +
   scale_color_manual(values=cbPalette) +
   scale_fill_manual(values=cbPalette) +
-  labs(y=expression("Predicted Relative Abundance ( "*lambda* ")"), color="Zone", fill="Zone") +
+  labs(y=expression("Predicted Relative Abundance"), color="Zone", fill="Zone") +
+  ggtitle("Royle-Nichols") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
         plot.title = element_text(hjust = 0.5),
@@ -299,15 +301,43 @@ totalpop.posterior <- lambda.CIs2019
 CL2019A <- apply(lambda.CIs, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
 
 
+#####################################################################################
+#                             AAH model                                             #
+#####################################################################################
+AAH <- read_xlsx("./Widley_BearZoneEstimates2025.xlsx")%>%
+  select(-matches(as.character(c(2011:2018, 2025:2026))))%>%
+  pivot_longer(cols=as.character(2019:2024),names_to = "Year", values_to = "estimate")%>%
+  pivot_wider(names_from = Parameter, values_from = estimate)%>%
+  mutate(Zone=as.factor(Zone))
 
+AAHplot <-  ggplot(AAH, aes(x=Year, y=Mean.Est, colour = Zone, group=Zone)) +
+   geom_point(size=2) +
+   geom_line(lwd=1) +
+   geom_ribbon(aes(ymin = LCrI.Est, ymax = UCrI.Est,color= Zone, fill=Zone), alpha=0.3) +
+   scale_color_manual(values=cbPalette) +
+   scale_fill_manual(values=cbPalette) +
+   labs(y=expression("Abundance"), color="Zone", fill="Zone") +
+   ggtitle("Age-at-Harvest") +
+   theme(panel.background = element_blank(),
+         panel.grid = element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         axis.line = element_line(color = "black", linewidth = 0.5),
+   )
+
+
+ 
+ (AAHplot + RNplot) + plot_layout(guides = "collect") &  guides(color = guide_legend(nrow = 1)) & 
+  theme(legend.position = "bottom", legend.direction = "horizontal")
+ 
 
 #####################################################################################
 #                   spatial prediction across years                                 #
 #####################################################################################
 lambda.rast.stack <- rast(lambda.rast)
-Wisconsin.RastCRS <- st_transform(Wisconsin2, crs=crs(lambda.rast.stack))
+lambda.rast.stack.4326 <- project(lambda.rast.stack, "EPSG:4326")
+Wisconsin.RastCRS <- st_transform(Wisconsin2, crs="EPSG:4326")
 ggplot() +
-  geom_spatraster(data = lambda.rast.stack) +
+  geom_spatraster(data = lambda.rast.stack.4326) +
   geom_sf(data=Wisconsin.RastCRS, fill=NA) +
   scale_fill_viridis_c(na.value = "transparent", option="C") +
   facet_wrap(~lyr) + 
@@ -336,9 +366,10 @@ lambda.rast.NoSpline <- lapply(lambda.predicted.gridNoSpline, function (x) {
 })
 
 lambda.rast.stack.NoSpline <- rast(lambda.rast.NoSpline)
-Wisconsin.RastCRS <- st_transform(Wisconsin2, crs=crs(lambda.rast.stack.NoSpline))
+lambda.rast.stack.NoSpline.4326 <- project(lambda.rast.stack.NoSpline, "EPSG:4326")
+Wisconsin.RastCRS <- st_transform(Wisconsin2, crs="EPSG:4326")
 NoSpline2024 <- ggplot() +
-  geom_spatraster(data = lambda.rast.stack.NoSpline[[6]]) +
+  geom_spatraster(data = lambda.rast.stack.NoSpline.4326[[6]]) +
   geom_sf(data=Wisconsin.RastCRS, fill=NA) +
   scale_fill_viridis_c(na.value = "transparent", option="C", limits=c(0,6)) +
   theme(panel.background = element_blank(),
@@ -351,7 +382,7 @@ NoSpline2024 <- ggplot() +
   labs(fill=expression("Predicted\n Relative\n Abundance ("*lambda* ")"),
   )
 Spline2024 <- ggplot() +
-  geom_spatraster(data = lambda.rast.stack[[6]]) +
+  geom_spatraster(data = lambda.rast.stack.4326[[6]]) +
   geom_sf(data=Wisconsin.RastCRS, fill=NA) +
   scale_fill_viridis_c(na.value = "transparent", option="C",  limits=c(0,6)) +
   theme(panel.background = element_blank(),
@@ -369,11 +400,15 @@ NoSpline2024 + Spline2024 + plot_layout(guides = "collect") &
 ################################################################################
 ###                         spatial spline                                   ###
 ################################################################################
+
 Zrast3 <- exp(Zrast2)
+Zrast3.4326 <- project(Zrast3, "EPSG:4326")
+Wisconsin.RastCRS <- st_transform(Wisconsin2, crs="EPSG:4326")
+bearzones.4326 <- st_transform(bearzones, crs="EPSG:4326")
 ggplot() +
-  geom_spatraster(data = Zrast3) +
+  geom_spatraster(data = Zrast3.4326) +
   geom_sf(data=Wisconsin.RastCRS, fill=NA) +
-  geom_sf(data=bearzones, color="black", fill=NA, linewidth=1.25) +
+  geom_sf(data=bearzones.4326, color="black", fill=NA, linewidth=1.25) +
   scale_fill_viridis_c(na.value = "transparent", option="C") +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),

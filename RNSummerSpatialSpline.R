@@ -34,7 +34,7 @@ bearrange2 <- st_intersection(bearrange, Wisconsin2)
 #5/21-8/26 this data frame doesn't have NAs for cam site-year-occs that dont have effort its just missing those rows
 #results in n.occs column being wrong but don't think that matters
 ModelingDF <- readRDS("./ModelingDFSummer.rds")%>%st_transform(., 3071)
-ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(40:47))
+ModelingDF1 <- st_join(ModelingDF, bearrange2)%>%drop_na(bearrange)%>%select(-c(47:54))
 ModelingDF1 <- ModelingDF1%>%cbind(., st_coordinates(.))%>%
   st_drop_geometry()%>%ungroup()%>%filter(occ > 3 & occ < 18)%>%filter(BEAR_ADULT_AMT < 200) #5/21-8/26
 #remove occasions which have multiple camera versions
@@ -77,9 +77,9 @@ for( t in 1:no.years ) {
 }
 
 #scale continuous variables and rename season to yearID
-ModelingDF2 <- ModelingDF1%>%mutate(across(c(10, 12, 14:40), scale))%>%rename(yearID=season)
+ModelingDF2 <- ModelingDF1%>%mutate(across(c(10, 12, 14:47), scale))%>%rename(yearID=season)
 #create vector of selection scale variables
-scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+$", value = TRUE)
+scalevars <- grep(x = colnames(ModelingDF2), pattern = "\\d+\\w*$", value = TRUE)
 #create vector of site covariate variables
 sitecovcols <- c("cam_site_id", "yearID", "year", "X", "Y", scalevars)
 #make dataframe of site covariates and add site ID
@@ -203,18 +203,19 @@ for( t in 1:no.years ) {
 Developed_array <- Developed_array[,,c(2,3,4,5)]
 
 #Disturbance
-Dist <- sitecovs%>%select(yearID, siteID, matches("Dist"))%>%
-  pivot_longer(cols = matches("Dist"), names_pattern="(\\d+$)", names_to = "scale")
+Dist <- sitecovs%>%select(yearID, siteID, matches("FDist"))%>%
+  pivot_longer(cols = matches("FDist"), names_pattern="(\\d+)", names_to = "scale")
+scales25 <- scales[2:5]
 
-Dist_array <- array(NA, dim=c(maxsites,no.years,5)) #sites, years, scales
+Dist_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
 for( t in 1:no.years) {
-  for( s in 1:5) {
+  for( s in 1:4) {
     for( i in 1:nsite[t]){
-      Dist_array[ i, t, s] <- Dist[ c( Dist$siteID == i & Dist$scale == scales[s] & Dist$yearID == t), "value"]$value
+      Dist_array[ i, t, s] <- Dist[ c( Dist$siteID == i & Dist$scale == scales25[s] & Dist$yearID == t), "value"]$value
     }
   }
 }
-Dist_array <- Dist_array[,,c(2,3,4,5)]
+
 
 #Proportion of Forest
 Forest <- sitecovs%>%select(yearID, siteID, matches("Forest"))%>%
@@ -365,24 +366,6 @@ for( t in 1:no.years ) {
 ############################################
 ############# R-N Model ####################
 ############################################
-# Create constants for model from array.
-constants <- list(
-  nyear = dim(Bear_All)[[3]],
-  nsite = nsite,
-  camsites=camsites, #need this indexed by [i,t] and [i,t,k]? Or maybe not
-  ncams=length(unique(ModelingDF2$cam_site_id)),
-  nversions=length(unique(cam_version$cam_versionID2))-1,
-  nsurveys=nsurveys2,
-  camversion=camversion_array,
-  sp.nknots=50,
-  EVI.nknots=5,
-  Zone=zone,
-  nZones=6,
-  e=0.001
-)
-# Zone=zone,
-# nZones=length(unique(Zones$bear_mgmt_unit_id))
-# Bundle data (counts and covariates).
 data <- list(
   y = Bear_All,
   Year = yr,
@@ -399,6 +382,57 @@ data <- list(
   sp.Z= sp.Zarray,
   EVI.Z= EVIZ_array
 )
+# Create constants for model from array.
+constants <- list(
+  nyear = dim(Bear_All)[[3]],
+  nsite = nsite,
+  totalsites=sum(nsite),
+  n=prod(dim(data$y)) - length(which(is.na(data$y))),
+  camsites=camsites, #need this indexed by [i,t] and [i,t,k]? Or maybe not
+  ncams=length(unique(ModelingDF2$cam_site_id)),
+  nversions=length(unique(cam_version$cam_versionID2))-1,
+  nsurveys=nsurveys2,
+  camversion=camversion_array,
+  sp.nknots=50,
+  EVI.nknots=5,
+  Zone=zone,
+  nZones=6,
+  e=0.001
+)
+# Zone=zone,
+# nZones=length(unique(Zones$bear_mgmt_unit_id))
+# Bundle data (counts and covariates).
+
+
+
+
+grand.mean <- nimbleFunction( # this one should compile because it doesn’t try to operate on a 3D array
+  run = function(arr = double(3),
+                 n = double(0)) {
+    # sum 1 at a time over the shortest dim
+    dims <- dim(arr)
+    vec <- nimNumeric(dims[3], init = FALSE)
+    
+    for(i in 1:dims[3]){
+      vec[i] <- sum(arr[,,i])
+    }
+    total <- sum(vec)
+    mn <- total/n
+    
+    returnType(double(0))
+    return(mn)
+  })
+compileNimble((grand.mean))
+occ.mean <- nimbleFunction( # this one should compile because it doesn’t try to operate on a 3D array
+  run = function(mat = double(2),
+                 no.sites = double(0)) {
+    total <- sum(mat)
+    mn <- total/no.sites
+    
+    returnType(double(0))
+    return(mn)
+  })
+
 
 RNcode <- nimbleCode({
   
@@ -436,9 +470,9 @@ RNcode <- nimbleCode({
  
   
   
-  # for (k in 1:sp.nknots) {
-  #   spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
-  # }
+  for (k in 1:sp.nknots) {
+     spat.spline.b[k] ~ dnorm(0,sigma.spat.spline.b)
+  }
   for (k in 1:EVI.nknots) {
     b[k] ~ dnorm(0,sigma.EVI)
   }
@@ -460,10 +494,10 @@ RNcode <- nimbleCode({
   
   # # camera site random effect for detection
   # for(c in 1:ncams){
-  #   eps_p[c] ~ dnorm(0, sd_p)
-  # }
+  #    eps_p[c] ~ dnorm(0, sd_p)
+  #  }
   # # hyperprior for abundance random effect
-  # sd_p ~ dgamma(1, 2)
+  #  sd_p ~ dgamma(1, 2)
   
   ## Priors for scales  ##
   abundance_scale[1] ~ dcat(catprobs[1:4])
@@ -483,44 +517,20 @@ RNcode <- nimbleCode({
         b_Corn*Corn[i,t,abundance_scale[1]] + b_Dev*Dev[i,t,abundance_scale[2]] +
         b_Dist*Dist[i,t,abundance_scale[3]] + b_Forest*Forest[i,t,abundance_scale[4]] + 
         b_Wetland*Wetland[i,t,abundance_scale[5]] +
-        s[i,t] #s[i,t] - spatial random effect
-      
-      s[i,t] <- inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
+        inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
+
       
       #detection model  
       for(k in 1:nsurveys[i,t]){
         muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
         logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + 
-          a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]] do i need variation here?
+          a_EVI * EVI[i,k,t] + inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots]) #+ eps_p[camsites[i,t]] do i need variation here?
         y[i, k, t] ~ dbern(muy[i, k, t])
         
-        EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
       
       }
-      
     }
   }
-  
-  #GOF
-  for( t in 1:nyear ) {
-    for( i in 1:nsite[t] ){
-      for(k in 1:nsurveys[i,t]){
-        ynew[i, k, t] ~ dbern(muy[i, k, t])
-      }
-      sum.y[i,t] <- sum(y[i,1:nsurveys[i,t],t])                                                      # Summation of observed detections per site
-      sum.ynew[i,t] <- sum(ynew[i,1:nsurveys[i,t],t])                                                # Summation of replicated detection per site
-      e.count[i,t] <- sum(muy[i,1:nsurveys[i,t],t])                                                   # Expected detections per site
-      
-      # Chi-square discrepancy for the actual data.
-      chi2.actual[i,t] <- pow((sum.y[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)          # e is a small constant to avoid any division by zero (Kery and Royle 2016)
-      
-      # Chi-square discrepancy for the simulated data
-      chi2.sim[i,t] <- pow((sum.ynew[i,t]-e.count[i,t]), 2) / (e.count[i,t] + e)
-    }
-  }
-    
-    chifit.actual <- sum(chi2.actual[1:1071,1:6])
-    chifit.sim <- sum(chi2.sim[1:1071,1:6])
   
 
 })
@@ -533,7 +543,6 @@ inits <- function() {
   base::list(N = matrix(data = rep(1, max(constants$nsite)*constants$nyear),
                         nrow = max(constants$nsite),
                         ncol = constants$nyear),
-             #b_Yr = runif(1, -1, 1),
              b_Zone = runif(constants$nZones, -1, 1),
              b_ZoneYr = runif(constants$nZones, -1, 1),
              b_Dev = runif(1, -1, 1),
@@ -548,32 +557,8 @@ inits <- function() {
              sigma.spat.spline.b=1,
              b=rep(1,constants$EVI.nknots),
              sigma.EVI=1,
-             #a_occ = runif(1, -1, 1),
-             #eps_N = rnorm(constants$ncams, 0, 2),
-             # eps_p = rnorm(constants$ncams, 0, 2),
-             # sd_p = runif(1, 0, 2),
-             abundance_scale=rcat(5, c(0.25,0.25,0.25,0.25)),
-             rho = array(data = runif(length(Bear_All), 0, 1),
-                         dim=c(maxsites,no.occs,no.years)),
-             ynew=array(data = rep(1, length(Bear_All)),
-                        dim=c(maxsites,no.occs,no.years)),
-             sum.y=matrix(rep(5,max(constants$nsite)*constants$nyear),
-             nrow = max(constants$nsite),
-             ncol = constants$nyear),
-             sum.ynew=matrix(rep(5,max(constants$nsite)*constants$nyear),
-                             nrow = max(constants$nsite),
-                             ncol = constants$nyear),
-             e.count=matrix(rep(4.5,max(constants$nsite)*constants$nyear),
-                            nrow = max(constants$nsite),
-                            ncol = constants$nyear),
-             chi2.actual=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
-                                nrow = max(constants$nsite),
-                                ncol = constants$nyear),
-             chi2.sim=matrix(runif(max(constants$nsite)*constants$nyear, 1, 50),
-                             nrow = max(constants$nsite),
-                             ncol = constants$nyear),
-             chifit.actual=runif(1, 1, 100),
-             chifit.sim=runif(1, 1, 100)
+             abundance_scale=rcat(5, c(0.25,0.25,0.25,0.25))
+             
   )
 }
 
@@ -581,10 +566,10 @@ inits <- function() {
 keepers <- c("b_Zone", "b_ZoneYr",'b_Dev',
              "b_Dist", "b_Forest", "b_Corn",
              "b_Wetland",
-              "b",
-             "a_version", "a_daysactive", "a_EVI", 
-             "abundance_scale", "chifit.actual",
-             "chifit.sim") #"b_X","b_Y", "spat.spline.b",
+              "b", "spat.spline.b",
+             "a_version", "a_daysactive", "a_EVI",
+             "N", "rho",
+             "abundance_scale") #"b_X","b_Y",
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
 # running with 200 iterations took about 10 minutes on my laptop with 4 cores
@@ -621,7 +606,24 @@ c_model <- nimble::compileNimble(model)
 model_conf <- nimble::configureMCMC(model)# enableWAIC = TRUE
 
 model_conf$addMonitors(keepers)
+model_conf$printSamplers("spat.spline.b")
 
+spatial_nodes <- model$expandNodeNames('spat.spline.b')
+for(node in spatial_nodes) {
+  model_conf$removeSamplers(node)
+}
+
+# Create 5 sub-blocks of 10 knots each
+chunk_size <- 10
+splits <- split(spatial_nodes, ceiling(seq_along(spatial_nodes) / chunk_size))
+
+for(block_nodes in splits) {
+  model_conf$addSampler(target = block_nodes, type = "RW_block")
+}
+
+model_conf$removeSamplers(c("b_Corn", "b_Dev", "b_Forest", "b_Wetland"))
+
+model_conf$addSampler(target=c("b_Corn", "b_Dev", "b_Forest", "b_Wetland"), type="RW_block")
 
 #reversible jump MCMC
 # configureRJ(RN_code,
@@ -653,11 +655,11 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nburnin = nb, 
                            niter = ni, 
                            nchains = nc, 
-                           thin= 5,
+                           thin= 25,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc
-                                 p <- version + daysactive + EVI + EVIspline GOF"))
-saveRDS(samples2, "./RNsamplesFullModelBearRangeSummerNoSplineGOF.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline + camsiteRE muy,p"))
+saveRDS(samples2, "./RNsamplesFullModelBearRangeSummerSplineGOF5.rds")
 
 samples <- readRDS("./RNsamples50000Summer.rds")
 
@@ -666,18 +668,17 @@ MCMCsummary(samples,params = "b_HFI", round = 2)
 MCMCsummary(samples,params = "abundance_scale", round = 2)
 MCMCsummary(samples,params = "a_version", round = 2) 
 MCMCsummary(samples[[1]],params = c("lambda[1000, 1]", "lambda[1255, 1]", "lambda[1262, 1]", "lambda[1066, 2]", "lambda[1067, 2]"), round = 2, ISB = FALSE)
-
+MCMCsummary(samples,params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"), round = 2)
 
 PR <- rnorm(15000, 0, 2)
 MCMCtrace(samples, 
           params = c( 'b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"),
           ISB = TRUE,
           exact = TRUE,
-          priors = PR,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samplesSummer[1:3], 
+MCMCtrace(samples, 
           params = c( "b_ZoneYr", "b_Zone"),
           ISB = TRUE,
           exact = FALSE,
@@ -686,13 +687,23 @@ MCMCtrace(samplesSummer[1:3],
           Rhat = TRUE,
           n.eff = TRUE)
 MCMCtrace(samples, 
-          params = c('spat.spline.b[1]', 'spat.spline.b[2]', 'spat.spline.b[3]', 'spat.spline.b[4]', 'spat.spline.b[5]'),
+          params = c( "mean.p", "mean.r"),
+          ISB = TRUE,
+          exact = FALSE,
+          #priors = PR,
+          pdf = FALSE,
+          Rhat = TRUE,
+          n.eff = TRUE)
+samplesList <- mcmc.list(lapply(samples, mcmc))
+gelman.diag(samplesList[, "spat.spline.b"], multivariate=FALSE)
+MCMCtrace(samples, 
+          params = c('spat.spline.b[33]', 'spat.spline.b[47]', 'spat.spline.b[3]', 'spat.spline.b[4]', 'spat.spline.b[5]'),
           ISB = FALSE,
           exact = TRUE,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCtrace(samplesSummer[1:3], 
+MCMCtrace(samples, 
           params = c('abundance_scale'),
           ISB = TRUE,
           exact = TRUE,
@@ -728,12 +739,142 @@ MCMCsummary(samples,
             params = c("chifit.actual", "chifit.sim"), #still has nodes for "lambda[1243, 1]" and such
             ISB = TRUE,
             round=2)
+MCMCsummary(samples, 
+            params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"), #still has nodes for "lambda[1243, 1]" and such
+            ISB = TRUE,
+            round=2)
+MCMCsummary(samples, 
+            params = c("spat.spline.b"), #still has nodes for "lambda[1243, 1]" and such
+            ISB = TRUE,
+            round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
 
 #Bayesian p-value
-allchainsChi <- MCMCchains(samples, params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
+allchainsChi <- MCMCchains(samplesSummer[1:3], params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
 mean(allchainsChi[,"chifit.sim"] > allchainsChi[,"chifit.actual"]) #0.7290513
 hist(allchainsChi[,"chifit.sim"])
+
+samples <- readRDS("./RNsamplesFullModelBearRangeSummerSplineGOF5.rds")
+samples2 <- samples[1:3]
+coda.samples <- as.mcmc.list(lapply(samples2, as.mcmc))
+
+rhonames <- character()
+for(t in 1:constants$nyear){
+  for(i in 1:constants$nsite[t]){
+    for(k in 1:constants$nsurveys[i,t]){
+      rhonames <- c(rhonames, paste0("rho[", paste(i,k,t, sep=", "), "]"))
+    }
+  }
+}
+
+Nnames <- character()
+for(t in 1:constants$nyear){
+  for(i in 1:constants$nsite[t]){
+    Nnames <- c(Nnames, paste0("N[", paste(i,t, sep=", "), "]"))
+  }
+}
+
+
+rho <- coda.samples[, rhonames, drop = FALSE]
+rhomeans <- colMeans(as.matrix(rho))  #quick!
+grandrhomean <- mean(rhomeans)
+grandrhoCRI <- quantile(rhomeans, c(.025, .975))
+
+#PPC
+gof_N_rho <- nimbleFunction(
+  run = function(y = double(3),
+                 N = double(2),
+                 rho = double(3),
+                 nsurveys = integer(2),
+                 nsite = integer(1),
+                 nyear = integer(0)) {
+    
+    chi.actual <- 0.0
+    chi.sim <- 0.0
+    
+    for(t in 1:nyear){
+      for(i in 1:nsite[t]){
+        
+        obs.count <- 0.0
+        sim.count <- 0.0
+        exp.count <- 0.0
+        
+        for(k in 1:nsurveys[i,t]){
+          
+          # expected detection probability
+          muy <- 1.0 - (1.0 - rho[i,k,t]) ^ N[i,t]
+          
+          # observed detections
+          obs.count <- obs.count + y[i,k,t]
+          
+          # posterior predictive replicate
+          sim.count <- sim.count + rbinom(1, 1, muy)
+          
+          # expected detections
+          exp.count <- exp.count + muy
+        }
+        
+        # Pearson chi-square discrepancy
+        chi.actual <- chi.actual +
+          ((obs.count - exp.count)^2) /
+          (exp.count + 1e-6)
+        
+        chi.sim <- chi.sim +
+          ((sim.count - exp.count)^2) /
+          (exp.count + 1e-6)
+      }
+    }
+    
+    
+    returnType(double(1))
+    return(c(chi.actual, chi.sim))
+  }
+)
+
+
+gof_N_rho_C <- compileNimble(gof_N_rho)
+
+
+
+gof <- matrix(NA, nrow=niter, ncol=2)
+nchains <- length(samples[1:3])
+gof <- vector("list", nchains)
+N_cols <- grep("^N", colnames(samples[[1]]))
+rho_cols <- grep("^rho", colnames(samples[[1]]))
+
+for(ch in 1:nchains){
+  chain <- samples[[ch]]
+  niter <- 50
+  gof_chain <- matrix(NA, nrow=niter, ncol=2)
+  chainsamples <- sample(1:nrow(chain), size = niter, replace = FALSE)
+  for(s in 1:niter){
+  
+  N.s <- matrix(chain[chainsamples[s], N_cols], 
+                  nrow=1071,
+                  ncol=6)
+  
+  rho.s <- array(chain[chainsamples[s], rho_cols],
+                 dim=c(1071,14,6))
+  
+  gof_chain[s,] <- gof_N_rho_C(
+    y = data$y,
+    N = N.s,
+    rho = rho.s,
+    nsurveys = constants$nsurveys,
+    nsite = unname(constants$nsite),
+    nyear = constants$nyear
+  )
+  }
+  gof[[ch]] <- gof_chain
+  
+  rm(chain); gc()
+}
+gof <- do.call(rbind, gof) #21:03
+bayes.p <- mean(gof[,2] > gof[,1])
+bayes.p
+
+
+
 
 #predicting EVI spline
 EVI.pred <- seq(from=range(EVI2$meanEVI)[1], to=range(EVI2$meanEVI)[2], length.out=100)
@@ -1002,3 +1143,47 @@ day_occasion_df <-
   dplyr::mutate(
     occ = dplyr::ntile(day_of_season, num_occasions)) %>%
   dplyr::ungroup()
+
+test = matrix(runif(100), 10, 10)
+mean(apply(test, 1, mean)) 
+sd(apply(test, 1, mean)) 
+mean(test)
+sd(test)
+
+
+test = array(0, c(10,10,1000))
+for(i in 1:10){
+  for(j in 1:10){
+    test[i,j,] <- rbeta(1000, rgamma(1, 5,5), rgamma(1,6,6))
+  }	
+}
+test[sample(1:length(test), size=5000,replace=FALSE)] <- NA
+mean(test, na.rm=TRUE)
+mean(test[,,1], na.rm=TRUE)
+# get the row means posteriors, and then average those to get the grand mean over all rows
+rmeans <- apply(test, c(1, 3), mean)
+mn1 = apply(rmeans, 2, mean) # posterior for grand mean
+mean(mn1)
+sd(mn1)
+# calculate the grand mean directly over all rows and columns
+mn2 = apply(test, 3, mean)
+mean(mn2)
+sd(mn2)
+#3 levels of mean
+mean(test)
+sd(test)
+# plot to demonstrat that the two posteriors are excatly identical
+plot(density(mn1), lwd = 2)
+lines(density(mn2), col = "red", lwd = 2, lty = 2)
+
+grand.mean(test)
+occ.mean(test[,,1])
+compiled_grand.mean <- compileNimble(grand.mean)
+compiled_mean.r(test)
+compiled_occ.mean <- compileNimble(occ.mean)
+compiled_occ.mean(test[,,1])
+
+
+
+
+

@@ -129,6 +129,95 @@ ggplot(a_Fixed, aes(x=Var, y=mean)) + geom_pointrange(aes(ymin=X2.5., ymax=X97.5
   #scale_color_manual(values=rev(cbPalette)) +
   #scale_x_discrete(labels = c("Forest Disturbance" = "Forest\nDisturbance"))
 
+
+########################################################################
+#                     detection probability                            #
+########################################################################
+#predicting EVI spline
+EVI.pred.mean <- mean(EVI2$meanEVI)
+pred.data <- expand.grid(camversion=1, daysactive=0.2211643, EVI=EVI.pred.mean)
+# prediction dataset for spatial smoothing
+pred.EVI.Z_K <- (abs(outer(as.numeric(pred.data$EVI),EVI.knots,"-")))^3
+
+pred.EVI.Z <- t(solve(EVI.sqrt.OMEGA_all,t(pred.EVI.Z_K)))
+
+# standardize for better performance
+pred.EVI.Z <- (pred.EVI.Z-meanZ)/sdZ
+pred.data2 <- cbind(pred.data, pred.EVI.Z)
+
+#get mean response of spline
+bmeans <- MCMCsummary(samplesSummer[1:3],params = "b", round = 3, ISB = T)
+camversionmeans <- MCMCsummary(samplesSummer[1:3],params = "a_version", round = 3, ISB = T)
+daysactivemean <- MCMCsummary(samplesSummer[1:3],params = "a_daysactive", round = 3, ISB = T)
+EVImean <- MCMCsummary(samplesSummer[1:3],params = "a_EVI", round = 3, ISB = T)
+rho.mean <- plogis(camversionmeans$mean[1] + daysactivemean$mean*0.2211643 + EVImean$mean*pred.data$EVI +bmeans$mean[1]*pred.EVI.Z[,1] + bmeans$mean[2]*pred.EVI.Z[,2] + bmeans$mean[3]*pred.EVI.Z[,3] +
+                     bmeans$mean[4]*pred.EVI.Z[,4] + bmeans$mean[5]*pred.EVI.Z[,5])
+#get CRIs for spline
+#combine MCMC chains into one
+allchains <- MCMCchains(samplesSummer[1:3], params =c("a_version", "a_daysactive", "a_EVI", "b"))
+allchainssample <- allchains[sample(nrow(allchains), 10000), ]
+#loop through estimated parameter at each iteration
+rho.preds <- array(dim = c(length(pred.data$EVI), 10000))
+for(j in 1:10000){
+  rho.preds[,j] <- plogis(allchainssample[,"a_version[1]"][j] + allchainssample[,"a_daysactive"][j]*0.2211643 + allchainssample[,"a_EVI"][j]*pred.data$EVI + 
+                            allchainssample[,"b[1]"][j]*pred.EVI.Z[,1] + allchainssample[,"b[2]"][j]*pred.EVI.Z[,2] + allchainssample[,"b[3]"][j]*pred.EVI.Z[,3] +
+                            allchainssample[,"b[4]"][j]*pred.EVI.Z[,4] + allchainssample[,"b[5]"][j]*pred.EVI.Z[,5])
+}
+#calculate interval
+CL <- apply(rho.preds, 1, function(x){quantile(x, prob = c(0.025, 0.975))})
+#rho mean = 0.114
+
+
+for( t in 1:constants$nyear ) { #loop over site then year?
+  #state model
+  # Loop through only the sites that are surveyed in a given year. 
+  for( i in 1:constants$nsite[t] ){
+    log(lambda[i, t]) <-  b_Zone[Zone[i,t]] + b_ZoneYr[Zone[i,t]]*Year[i, t] +  #make this a factor? 
+      #scaled parameters
+      b_Corn*Corn[i,t,abundance_scale[1]] + b_Dev*Dev[i,t,abundance_scale[2]] +
+      b_Dist*Dist[i,t,abundance_scale[3]] + b_Forest*Forest[i,t,abundance_scale[4]] + 
+      b_Wetland*Wetland[i,t,abundance_scale[5]] +
+      s[i,t] #s[i,t] - spatial random effect
+    
+    s[i,t] <- inprod(spat.spline.b[1:sp.nknots],sp.Z[i,t,1:sp.nknots])
+    
+    
+    #detection model  
+    for(k in 1:nsurveys[i,t]){
+      muy[i, k, t] <- 1 - pow(1-rho[i,k,t], N[i, t]) #
+      logit(rho[i, k, t]) <- a_version[camversion[i,k,t]] + a_daysactive*daysactive[i,k,t] + 
+        a_EVI * EVI[i,k,t] + EVI.spline[i,k,t] #+ eps_p[camsites[i,t]] do i need variation here?
+      y[i, k, t] ~ dbern(muy[i, k, t])
+      
+      EVI.spline[i,k, t] <- inprod(b[1:EVI.nknots],EVI.Z[i,k,t,1:EVI.nknots])
+      
+    }
+  }
+}
+
+
+########################################################################
+#                        cam version                                   #
+########################################################################
+allchains_camversion <- MCMCchains(samplesSummer[1:3], params =c("a_version"), ISB = TRUE)
+camversiondifference <- allchains_camversion[,"a_version[1]"]-allchains_camversion[,"a_version[2]"]
+mean(camversiondifference)
+quantile(camversiondifference, prob = c(0.025, 0.975))
+
+
+########################################################################
+#                     site detection probability                       #
+########################################################################
+allchains_p <- MCMCchains(samples, params =c("muy"), ISB = TRUE)
+mean(allchains_p)
+
+rho.mean <- plogis(camversionmeans$mean[1] + daysactivemean$mean*0.2211643 + EVImean$mean*pred.data$EVI +bmeans$mean[1]*pred.EVI.Z[,1] + bmeans$mean[2]*pred.EVI.Z[,2] + bmeans$mean[3]*pred.EVI.Z[,3] +
+                     bmeans$mean[4]*pred.EVI.Z[,4] + bmeans$mean[5]*pred.EVI.Z[,5])
+
+
+p.sitemean <- 1-pow(1-rho.mean, lambda)
+mean(p.sitemean) #0.1285
+1-(1-mean(p.sitemean))^14
 ########################################################################
 #                        Scale Selection                               #
 ########################################################################
@@ -154,7 +243,7 @@ abundancescaleslong$Buffer <- as.factor(abundancescaleslong$Buffer)
 
 cbPalette <- c("#F0E442","#009E73", "#D55E00","#E69F00", "#0072B2","#56B4E9")
 ggplot(abundancescaleslong, aes(x=Buffer, y=Probability, fill=Var)) + 
-  facet_wrap(~Var) +
+  facet_wrap(~Var, scales = "free_x") +
   geom_col() +
   theme(panel.background = element_blank(),
         panel.grid = element_blank(),
@@ -1064,3 +1153,9 @@ p3 <- ggplot(mtcars) + geom_bar(aes(carb)) # This will be the offset plot
                    left = 0.2, bottom = -0.5, 
                    right = 1.2, top = 0.5)) +
   plot_layout(heights = c(2, 1))
+
+
+allchainsVersion <- MCMCchains(samples, params =c("a_version"))
+allchainssampleVersion <- allchainsVersion[sample(nrow(allchainsVersion), 10000), ]
+plogis(mean(allchainssampleVersion))
+plogis(quantile(allchainssampleVersion, c(0.025, 0.975)))

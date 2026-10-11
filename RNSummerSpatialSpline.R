@@ -8,14 +8,14 @@ library(sswids)
 library(stringr)
 library(fields)
 library(sswids)
-
+library(coda)
 
 
 
 #make bear range from counties layer
-Wisconsin <- st_read("C:/Users/wildeefb/Documents/GeoSpatial/VectorLayers/Wisconsin_State_Boundary_24K.shp")
+Wisconsin <- st_read("C:/Users/eliwi/Documents/GeoSpatial/Wisconsin_State_Boundary_24K.shp")
 Wisconsin2 <- Wisconsin%>%filter(INSIDE_WI_ == 1)
-counties <- get_spatial_data("counties")
+counties <- st_read("C:/Users/eliwi/Documents/GeoSpatial/County_Boundaries_24K.shp")
 counties$bearrange <- ifelse(counties$COUNTY_NAM %in% 
                                c("Vernon", "Crawford", "Richland", "Sauk", "Iowa", "Grant",
                                  "Lafayette", "Dane", "Green", "Rock", "Walworth", "Racine",
@@ -100,14 +100,20 @@ yr <- sitecovs%>%select(yearID, year, siteID)%>%
   select(-siteID)%>%
   as.matrix()%>%
   unname()
-
-
+yr2 <- sitecovs%>%select(yearID, year, siteID)%>%
+    mutate(year=year-2019)%>% # Reformatted (0, 1, 2, 3, 4).
+    mutate(year = as.numeric(scale(year)))%>%
+    pivot_wider(names_from = yearID, values_from = year)%>%
+    select(-siteID)%>%
+    as.matrix()%>%
+  unname()
 #make look up table for zones for each camsite
+bear_zones <- st_read("C:/Users/eliwi/Documents/GeoSpatial/Bear_Management_Zones.shp")
 Zones <- sitecovs%>%mutate(X=X*attr(X, 'scaled:scale') + attr(X, 'scaled:center'), 
                            Y=Y*attr(Y, 'scaled:scale') + attr(Y, 'scaled:center'))%>%
   st_as_sf(., coords=c("X", "Y"), crs=3071)%>%
-  st_join(.,st_transform(st_make_valid(get_spatial_data("bear_zones")), 3071))%>%
-  rename(zone=bear_mgmt_zone_id)%>%st_drop_geometry()
+  st_join(.,st_transform(st_make_valid(bear_zones), 3071))%>%
+  rename(zone=BEAR_MGMT_)%>%st_drop_geometry()
 ZoneQ <- Zones%>%group_by(zone, yearID)%>%summarise(n=n())
 table(is.na(Zones$zone))
 
@@ -203,8 +209,8 @@ for( t in 1:no.years ) {
 Developed_array <- Developed_array[,,c(2,3,4,5)]
 
 #Disturbance
-Dist <- sitecovs%>%select(yearID, siteID, matches("FDist"))%>%
-  pivot_longer(cols = matches("FDist"), names_pattern="(\\d+)", names_to = "scale")
+Dist <- sitecovs%>%select(yearID, siteID, matches("Dist_\\d{3,4}$"))%>%
+  pivot_longer(cols = matches("Dist_\\d{3,4}$"), names_pattern="(\\d+)", names_to = "scale")
 scales25 <- scales[2:5]
 
 Dist_array <- array(NA, dim=c(maxsites,no.years,4)) #sites, years, scales
@@ -531,7 +537,6 @@ RNcode <- nimbleCode({
       }
     }
   }
-  
 
 })
 
@@ -566,10 +571,10 @@ inits <- function() {
 keepers <- c("b_Zone", "b_ZoneYr",'b_Dev',
              "b_Dist", "b_Forest", "b_Corn",
              "b_Wetland",
-              "b", "spat.spline.b",
-             "a_version", "a_daysactive", "a_EVI",
-             "N", "rho",
-             "abundance_scale") #"b_X","b_Y",
+             "b", "spat.spline.b",
+             "a_version", "a_daysactive", "a_EVI", 
+             "abundance_scale",
+             "N", "rho") #"b_X","b_Y",
 
 # Will have to run chains for much longer (~40,000 iterations) to approach convergence
 # running with 200 iterations took about 10 minutes on my laptop with 4 cores
@@ -606,6 +611,7 @@ c_model <- nimble::compileNimble(model)
 model_conf <- nimble::configureMCMC(model)# enableWAIC = TRUE
 
 model_conf$addMonitors(keepers)
+model_conf$getMonitors()
 model_conf$printSamplers("spat.spline.b")
 
 spatial_nodes <- model$expandNodeNames('spat.spline.b')
@@ -655,13 +661,14 @@ samples <- nimble::runMCMC(c_model_mcmc,
                            nburnin = nb, 
                            niter = ni, 
                            nchains = nc, 
-                           thin= 25,
+                           thin= 10,
                            inits=inits())
-samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + Distsc + Forestsc + Cornsc + Wetlandsc + spatialspline
-                                 p <- version + daysactive + EVI + EVIspline + camsiteRE muy,p"))
-saveRDS(samples2, "./RNsamplesFullModelBearRangeSummerSplineGOF5.rds")
+samples2 <- append(samples, list("formula"= "log(lambda[i, t]) <- Zone + ZoneYr + Devsc + HDistsc + Forestsc + Cornsc + Wetlandsc + spatialspline
+                                 p <- version + daysactive + EVI + EVIspline rho,N "))
+saveRDS(samples2[1:4], "./RNsamplesFullModelBearRangeSummerSplineHDIST.rds")
 
-samples <- readRDS("./RNsamples50000Summer.rds")
+samples <- readRDS("./RNsamplesFullModelBearRangeSummerSplineHDIST.rds")
+
 
 MCMCsummary(samples,params = "b_Lat", round = 2)
 MCMCsummary(samples,params = "b_HFI", round = 2)
@@ -731,32 +738,32 @@ MCMCtrace(test,
           pdf = FALSE,
           Rhat = TRUE,
           n.eff = TRUE)
-MCMCsummary(samples, 
+MCMCsummary(samples[1:3], 
           params = c("b_Zone", "b_ZoneYr"), #still has nodes for "lambda[1243, 1]" and such
           ISB = TRUE,
           round=2)
-MCMCsummary(samples, 
+MCMCsummary(samplesSummer[1:3], 
             params = c("chifit.actual", "chifit.sim"), #still has nodes for "lambda[1243, 1]" and such
             ISB = TRUE,
             round=2)
-MCMCsummary(samples, 
+MCMCsummary(samples[1:3], 
             params = c('b_Dev', 'b_Forest', "b_Corn", "b_Dist", "b_Wetland"), #still has nodes for "lambda[1243, 1]" and such
             ISB = TRUE,
             round=2)
-MCMCsummary(samples, 
+MCMCsummary(samplesSummer[1:3], 
             params = c("spat.spline.b"), #still has nodes for "lambda[1243, 1]" and such
             ISB = TRUE,
             round=2)
 lambdameans <- MCMCpstr( samples, params = c("lambda"), func=mean, type="chain")[[1]]
 
 #Bayesian p-value
-allchainsChi <- MCMCchains(samplesSummer[1:3], params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
+allchainsChi <- MCMCchains(samples2[1:3], params =c("chifit.actual", "chifit.sim"), ISB = TRUE)
 mean(allchainsChi[,"chifit.sim"] > allchainsChi[,"chifit.actual"]) #0.7290513
 hist(allchainsChi[,"chifit.sim"])
 
 samples <- readRDS("./RNsamplesFullModelBearRangeSummerSplineGOF5.rds")
 samples2 <- samples[1:3]
-coda.samples <- as.mcmc.list(lapply(samples2, as.mcmc))
+coda.samples <- as.mcmc.list(lapply(samples2[1:3], as.mcmc))
 
 rhonames <- character()
 for(t in 1:constants$nyear){
@@ -773,6 +780,8 @@ for(t in 1:constants$nyear){
     Nnames <- c(Nnames, paste0("N[", paste(i,t, sep=", "), "]"))
   }
 }
+
+chi2.actualNames <- character()
 
 
 rho <- coda.samples[, rhonames, drop = FALSE]
@@ -833,10 +842,10 @@ gof_N_rho <- nimbleFunction(
 
 
 gof_N_rho_C <- compileNimble(gof_N_rho)
+#gof_N_rho_C2 <- compileNimble(gof_N_rho2)
 
 
-
-gof <- matrix(NA, nrow=niter, ncol=2)
+#gof <- matrix(NA, nrow=niter, ncol=2)
 nchains <- length(samples[1:3])
 gof <- vector("list", nchains)
 N_cols <- grep("^N", colnames(samples[[1]]))
@@ -844,7 +853,7 @@ rho_cols <- grep("^rho", colnames(samples[[1]]))
 
 for(ch in 1:nchains){
   chain <- samples[[ch]]
-  niter <- 50
+  niter <- 5000
   gof_chain <- matrix(NA, nrow=niter, ncol=2)
   chainsamples <- sample(1:nrow(chain), size = niter, replace = FALSE)
   for(s in 1:niter){
@@ -869,10 +878,10 @@ for(ch in 1:nchains){
   
   rm(chain); gc()
 }
-gof <- do.call(rbind, gof) #21:03
+gof <- do.call(rbind, gof) 
 bayes.p <- mean(gof[,2] > gof[,1])
 bayes.p
-
+threechainsbayes.p <- lapply(gof, function (x) mean(x[,2] > x[,1]))
 
 
 
